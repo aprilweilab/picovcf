@@ -21,4 +21,7 @@ extensions = ["breathe"]
 html_theme = "sphinx_rtd_theme"
 
 # Breathe configuration
+breathe_projects = {
+    "picovcf": DOC_OUTPUT + "/xml/",
+}
 breathe_default_project = "picovcf"
