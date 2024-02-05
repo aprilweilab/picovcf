@@ -1,0 +1,7 @@
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA00001	NA00002	NA00003
+20	14370	x	G	A	29	PASS	.	GT	.|.	.|.	.|.
+20	17330	y	T	A	3	q10	.	GT	.|.	.|.	.|.
+20	1110696	z	A	G,T	67	PASS	.	GT	.|.	.|.	.|.
+20	1230237	w	T	G	47	PASS	.	GT	.|.	.|.	.|.
+20	1234567	r	GTC	G,GTCT	50	PASS	.	GT	.|.	.|.	.|.
