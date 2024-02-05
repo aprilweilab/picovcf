@@ -1,4 +1,5 @@
 ![](https://github.com/aprilweilab/picovcf/actions/workflows/cmake-multi-platform.yml/badge.svg)
+![](https://readthedocs.org/projects/picovcf/badge/?version=latest)
 
 # picovcf
 
@@ -10,7 +11,7 @@ There are a lot of great tools for processing VCF files out there, but not many 
 
 Either copy the latest header file (`picovcf.hpp`) into your project directly, or make use of something like git submodules to include https://github.com/aprilweilab/picovcf.
 
-See the [vcfpp.cpp](https://github.com/aprilweilab/picovcf/blob/main/vcfpp.cpp) for an example of how to use the APIs. Read the Doxygen docs (**TODO**) for an overview of the API.
+See the [vcfpp.cpp](https://github.com/aprilweilab/picovcf/blob/main/examples/vcfpp.cpp) for an example of how to use the APIs. Read [the docs](https://picovcf.readthedocs.io/en/latest/) for an overview of the API.
 
 When building code that uses `picovcf.hpp`, define `VCF_GZ_SUPPORT=1` (`-DVCF_GZ_SUPPORT=1` on most compiler command lines) to enable zlib support for compressed VCF files.
 
