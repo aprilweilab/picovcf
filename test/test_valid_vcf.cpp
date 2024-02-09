@@ -22,7 +22,7 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_EQ(vcf.numIndividuals(), 3);
     ASSERT_EQ(vcf.getIndividualLabels(), std::vector<std::string>({"NA00001", "NA00002", "NA00003"}));
 
-    vcf.firstVariant();
+    vcf.seekBeforeVariants();
     for (size_t i = 0; i < EXPECT_VARIANTS; i++) {
         ASSERT_TRUE(vcf.hasNextVariant());
         vcf.nextVariant();
@@ -36,7 +36,7 @@ TEST(ValidVCF, SpecExample) {
     }
     ASSERT_FALSE(vcf.hasNextVariant());
 
-    vcf.firstVariant();
+    vcf.seekBeforeVariants();
     ASSERT_TRUE(vcf.hasNextVariant());
     vcf.nextVariant();
     VCFVariantView& variant1 = vcf.currentVariant();
@@ -123,7 +123,7 @@ TEST(ValidVCF, Indexable) {
     ASSERT_EQ(indexableData.getPosition(0), 55829);
 
     size_t index = 0;
-    vcf.firstVariant();
+    vcf.seekBeforeVariants();
     while (vcf.hasNextVariant()) {
         vcf.nextVariant();
         VCFVariantView& variant = vcf.currentVariant();
