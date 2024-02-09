@@ -955,7 +955,7 @@ public:
     /**
      * Change the parser position to be immediately _before_ the first variant.
      */
-    void firstVariant() {
+    void seekBeforeVariants() {
         PICOVCF_ASSERT_OR_MALFORMED(m_posVariants.first != INTERNAL_VALUE_NOT_SET,
                                     "File has no variant data");
         setFilePosition(m_posVariants);
@@ -1022,7 +1022,7 @@ public:
         if (posAfterLastVariant != FileOffset(0, 0)) {
             this->setFilePosition(posAfterLastVariant);
         } else {
-            this->firstVariant();
+            this->seekBeforeVariants();
         }
         auto prevFilePosition = this->getFilePosition();
         const size_t numIndividuals =
@@ -1121,7 +1121,7 @@ private:
     void scanVariants() {
         m_variants = 0;
         const auto originalPosition = getFilePosition();
-        this->firstVariant();
+        this->seekBeforeVariants();
         m_genomeRange.second = 0;
         while (this->hasNextVariant()) {
             this->nextVariant();
@@ -1236,7 +1236,7 @@ public:
             , m_header({0, 0, 0, 0, 0, 0,
                         std::numeric_limits<uint64_t>::max(),
                         std::numeric_limits<uint64_t>::max()})
-            , m_firstVariant(0) {
+            , m_beforeFirstVariant(0) {
         readAndCheckHeader();
     }
 
@@ -1405,7 +1405,7 @@ private:
         const size_t sizePerVar =
             sizeof(uint64_t) +                                     // Position
             ((m_header.numIndividuals * m_header.ploidy) + 7) / 8; // ceiling(GT data)
-        return m_firstVariant + (variantIndex * sizePerVar);
+        return m_beforeFirstVariant + (variantIndex * sizePerVar);
     }
 
     void readAndCheckHeader() {
@@ -1420,8 +1420,8 @@ private:
         m_infile.read(const_cast<char*>(m_source.c_str()), sourceLen);
         const size_t descriptionLen = readScalar<uint64_t>(m_infile);
         m_infile.read(const_cast<char*>(m_description.c_str()), descriptionLen);
-        m_firstVariant = m_infile.tellg();
-        PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants > m_firstVariant,
+        m_beforeFirstVariant = m_infile.tellg();
+        PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants > m_beforeFirstVariant,
                                    "Invalid variant info position " << m_header.filePosVariants);
     }
 
@@ -1471,7 +1471,7 @@ private:
     FixedHeader m_header;
     std::string m_source;
     std::string m_description;
-    std::streamoff m_firstVariant;
+    std::streamoff m_beforeFirstVariant;
     // These are indexed by the "variant index" (0-based), and hold in memory all of the reference/
     // alternate alleles. Even in an extremely large file, this will not be much RAM.
     std::vector<std::string> m_referenceAlleles;
@@ -1569,7 +1569,7 @@ public:
                          const std::vector<IndexT>& alleleIndexes) {
         assert(alleleIndexes.size() % m_header.ploidy == 0);
         assert(alleleIndexes.size() / m_header.ploidy == m_header.numIndividuals);
-        const size_t firstVariantIndex = m_header.numVariants;
+        const size_t seekBeforeVariantsIndex = m_header.numVariants;
         for (size_t i = 1; i <= altAlleles.size(); i++) {
             const std::string& alt = altAlleles[i-1];
             m_referenceAlleles.emplace_back(referenceAllele);
@@ -1586,7 +1586,7 @@ public:
                 }
             }
             if (!missingSamples.empty()) {
-                m_variantToMissingSamples.emplace(firstVariantIndex, std::move(missingSamples));
+                m_variantToMissingSamples.emplace(seekBeforeVariantsIndex, std::move(missingSamples));
             }
         }
     }
@@ -1667,7 +1667,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
                      std::string description = "") {
     VCFFile vcf(vcfFilename);
-    vcf.firstVariant();
+    vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
     vcf.nextVariant();
     VCFVariantView& variant1 = vcf.currentVariant();
@@ -1683,7 +1683,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
     std::ofstream outFile(outFilename, std::ios::binary);
     IGDWriter writer(ploidy, vcf.numIndividuals(), isPhased);
     writer.writeHeader(outFile, vcfFilename, description);
-    vcf.firstVariant();
+    vcf.seekBeforeVariants();
     while (vcf.hasNextVariant()) {
         vcf.nextVariant();
         VCFVariantView& variant = vcf.currentVariant();

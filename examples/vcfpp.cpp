@@ -39,7 +39,7 @@ int main(int argc, char *argv[]) {
         std::cout << "  Source: " << vcf.getMetaInfo("source") << std::endl;
         std::cout << "  Genome range: " << vcf.getGenomeRange().first
                                         << "-" << vcf.getGenomeRange().second << std::endl;
-        vcf.firstVariant();
+        vcf.seekBeforeVariants();
         if (vcf.hasNextVariant()) {
             vcf.nextVariant();
             std::cout << "  Has genotype data? " 
@@ -49,7 +49,7 @@ int main(int argc, char *argv[]) {
         std::cout << "Rows: variants" << std::endl;
         std::cout << "Columns: samples" << std::endl;
         // This assumes/checks for phased data.
-        vcf.firstVariant();
+        vcf.seekBeforeVariants();
         while (vcf.hasNextVariant()) {
             vcf.nextVariant();
             VCFVariantView variant = vcf.currentVariant();
