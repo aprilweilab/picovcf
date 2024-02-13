@@ -2,6 +2,7 @@
 
 #include "picovcf.hpp"
 
+#include <limits>
 #include <string>
 
 using namespace picovcf;
@@ -127,3 +128,38 @@ TEST(Helper, ZBufferedReader) {
     ASSERT_EQ(lineNo, 10);
 }
 #endif
+
+TEST(Helper, IGDAllele) {
+    auto a1 = IGDAllele("", 0);
+    ASSERT_FALSE(a1.isLong());
+    ASSERT_EQ(a1.getString(), "");
+
+    auto a2 = IGDAllele("A", 0);
+    ASSERT_FALSE(a2.isLong());
+    ASSERT_EQ(a2.getString(), "A");
+
+    auto a3 = IGDAllele("ACG", 0);
+    ASSERT_FALSE(a3.isLong());
+    ASSERT_EQ(a3.getString(), "ACG");
+
+    auto a4 = IGDAllele("ACGT", 0);
+    ASSERT_FALSE(a4.isLong());
+    ASSERT_EQ(a4.getString(), "ACGT");
+
+    auto a5 = IGDAllele("ACGTC", 0);
+    ASSERT_TRUE(a5.isLong());
+    ASSERT_EQ(a5.getLongIndex(), 0);
+
+    EXPECT_THROW(IGDAllele("ACGTC", ((size_t)std::numeric_limits<uint32_t>::max()) + 500), MalformedFile);
+
+    std::string fake = "ACGT";
+    fake[3] = 0x80; // Bad string value
+    EXPECT_THROW(IGDAllele(fake, 0), MalformedFile);
+
+    size_t largestIndex = std::numeric_limits<uint32_t>::max() / 2;
+    auto a6 = IGDAllele("ACGTC", largestIndex);
+    ASSERT_TRUE(a6.isLong());
+    ASSERT_EQ(a6.getLongIndex(), largestIndex);
+
+}
+

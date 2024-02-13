@@ -1176,6 +1176,51 @@ inline std::vector<IndexT> getSamplesWithAlt(const uint8_t* buffer,
     return std::move(result);
 }
 
+// INTERNAL CLASS
+// Compact representation of allele values.
+class IGDAllele {
+public:
+    static constexpr uint32_t IS_LONG = 0x80000000;
+
+    IGDAllele(const std::string& stringVal, size_t numLongAlleles)
+            : m_value()  {
+        if (stringVal.size() <= sizeof(m_value)) {
+            for (size_t i = 0; i < stringVal.size(); i++) {
+                ((char*)&m_value)[i] = stringVal[i];
+            }
+            PICOVCF_ASSERT_OR_MALFORMED(!(m_value & IS_LONG), "Invalid allele string " << stringVal);
+            assert(stringVal.size() == sizeof(m_value) || ((char*)&m_value)[sizeof(m_value)-1] == 0);
+        } else {
+            PICOVCF_ASSERT_OR_MALFORMED(!(numLongAlleles & IS_LONG || numLongAlleles > std::numeric_limits<uint32_t>::max()),
+                                        "Too many long alleles: " << numLongAlleles);
+            m_value = ((uint32_t)numLongAlleles) | IS_LONG;
+        }
+    }
+
+    std::string getString() const {
+        std::string result;
+        for (size_t i = 0; i < sizeof(m_value); i++) {
+            char c = ((char*)&m_value)[i];
+            if (0 == c) {
+                break;
+            }
+            result.push_back(c);
+        }
+        return std::move(result);
+    }
+
+    uint32_t getLongIndex() const {
+        return m_value & (~IS_LONG);
+    }
+
+    bool isLong() const {
+        return m_value & IS_LONG;
+    }
+private:
+    uint32_t m_value;
+};
+static_assert(sizeof(IGDAllele) == 4, "IGDAllele size changed");
+
 /**
  * Indexable individual genotype data.
  *
@@ -1321,7 +1366,11 @@ public:
         if (m_alternateAlleles.empty()) {
             readAllAlleleInfo();
         }
-        return m_alternateAlleles.at(variantIndex);
+        IGDAllele allele = m_alternateAlleles.at(variantIndex);
+        if (allele.isLong()) {
+            return m_longAlleles.at(allele.getLongIndex());
+        }
+        return allele.getString();
     }
 
     /**
@@ -1333,7 +1382,11 @@ public:
         if (m_referenceAlleles.empty()) {
             readAllAlleleInfo();
         }
-        return m_referenceAlleles.at(variantIndex);
+        IGDAllele allele = m_referenceAlleles.at(variantIndex);
+        if (allele.isLong()) {
+            return m_longAlleles.at(allele.getLongIndex());
+        }
+        return allele.getString();
     }
 
     /**
@@ -1430,6 +1483,8 @@ private:
         PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
         PICOVCF_RELEASE_ASSERT(m_referenceAlleles.empty());
         PICOVCF_RELEASE_ASSERT(m_alternateAlleles.empty());
+        m_referenceAlleles.reserve(m_header.numVariants);
+        m_alternateAlleles.reserve(m_header.numVariants);
         for (size_t i = 0; i < m_header.numVariants; i++) {
             std::string reference;
             const size_t refLen = readScalar<uint64_t>(m_infile);
@@ -1437,7 +1492,11 @@ private:
             reference.resize(refLen);
             m_infile.read(const_cast<char*>(reference.c_str()), refLen);
             PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
-            m_referenceAlleles.push_back(std::move(reference));
+            IGDAllele refAllele(reference, m_longAlleles.size());
+            if (refAllele.isLong()) {
+                m_longAlleles.push_back(std::move(reference));
+            }
+            m_referenceAlleles.push_back(std::move(refAllele));
 
             std::string alternate;
             const size_t altLen = readScalar<uint64_t>(m_infile);
@@ -1445,8 +1504,13 @@ private:
             alternate.resize(altLen);
             m_infile.read(const_cast<char*>(alternate.c_str()), altLen);
             PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
-            m_alternateAlleles.push_back(std::move(alternate));
+            IGDAllele altAllele(alternate, m_longAlleles.size());
+            if (altAllele.isLong()) {
+                m_longAlleles.push_back(std::move(alternate));
+            }
+            m_alternateAlleles.push_back(std::move(altAllele));
         }
+        m_longAlleles.shrink_to_fit();
     }
 
     void readAllMissingData() {
@@ -1472,10 +1536,14 @@ private:
     std::string m_source;
     std::string m_description;
     std::streamoff m_beforeFirstVariant;
+
     // These are indexed by the "variant index" (0-based), and hold in memory all of the reference/
     // alternate alleles. Even in an extremely large file, this will not be much RAM.
-    std::vector<std::string> m_referenceAlleles;
-    std::vector<std::string> m_alternateAlleles;
+    std::vector<IGDAllele> m_referenceAlleles;
+    std::vector<IGDAllele> m_alternateAlleles;
+    // Separate vector for storing the "long" alleles (larger than 4 nucleotides)
+    std::vector<std::string> m_longAlleles;
+
     // Missing data is expected to be very sparse, so it is stored separately and read all at once.
     // The key to this map is a variant index, the value is the list of sample indexes that had missing
     // data for that variant.
