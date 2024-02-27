@@ -98,6 +98,15 @@ int main(int argc, char *argv[]) {
         }
         stddevMuts = sqrt(stddevMuts/(double)igd.numSamples());
         std::cout << "  Stddev var/sample: " << stddevMuts << std::endl;
+    } else if (command == "freq") {
+        static constexpr char SEP = '\t';
+        std::cout << "POSITION" << SEP << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP << "TOTAL" << std::endl;
+        for (size_t i = 0; i < igd.numVariants(); i++) {
+            auto pos = igd.getPosition(i);
+            auto sampleList = igd.getSamplesWithAlt(i);
+            std::cout << igd.getPosition(i) << SEP << igd.getRefAllele(i) << SEP
+                << igd.getAltAllele(i) << SEP << sampleList.size() << SEP << igd.numSamples() << std::endl;
+        }
     }
     return 0;
 }
