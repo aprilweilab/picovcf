@@ -47,6 +47,9 @@ static constexpr size_t MISSING_VALUE = std::numeric_limits<IndexT>::max() - 1;
 
 static constexpr size_t INTERNAL_VALUE_NOT_SET = std::numeric_limits<size_t>::max();
 
+/** IGD can only store up to ploidy = 8 */
+static constexpr size_t MAX_PLOIDY = 8;
+
 /**
  * Exception thrown when there is a problem reading the underlying file.
  */
@@ -131,6 +134,12 @@ public:
         } \
     } while(0)
 
+// Divide by TO and take the ceiling. E.g., for converting bits to the number of bytes that will be
+// needed to store those bits (ceiling because bits may not be divisible by 8).
+template <typename T, size_t TO>
+inline T picovcf_div_ceiling(T value) {
+    return (value + (TO - 1)) / TO;
+}
 
 inline void picovcf_split(const std::string& theString, const char token, std::vector<std::string>& result) {
     size_t position = 0;
@@ -1163,15 +1172,37 @@ static inline T readScalar(std::istream& inStream) {
     return simpleValue;
 }
 
-inline std::vector<IndexT> getSamplesWithAlt(const uint8_t* buffer,
-                                                    const size_t numSamples) {
-    std::vector<IndexT> result;
-    for (size_t i = 0; i < numSamples; i++) {
-        const size_t byteOffset = (i / 8);
-        const size_t bitOffset = 7 - (i % 8);
-        if (buffer[byteOffset] & (0x1 << bitOffset)) {
-            result.push_back(i);
+/** Vector of sample indexes (IDs) */
+using IGDSampleList = std::vector<IndexT>;
+
+// NOTE: in order to use this for larger than byte at a time, some more math is needed to adjust
+// the sample IDs. This is more robust to uniformly distributed bits than other methods, in that
+// it skips 0 bytes and skips 0-prefixes.
+template <typename T>
+inline void samplesForBV(const T* buffer, size_t index, std::vector<IndexT>& result) {
+    constexpr size_t bits = sizeof(T)*8;
+    constexpr size_t mask = 0x1 << (bits - 1);
+    static_assert(sizeof(T) == 1, "More math needed to support larger types");
+    T value = buffer[index];
+    size_t bit = 0;
+    const size_t sampleOffset = index * bits;
+    while (value != 0) {
+        const bool isSet = (bool)(value & mask);
+        if (isSet) {
+            const IndexT sampleId = sampleOffset + bit;
+            result.push_back(sampleId);
         }
+        value <<= 1U;
+        bit++;
+    }
+}
+
+// INTERNAL helper.
+inline IGDSampleList getSamplesWithAlt(const uint8_t* buffer,
+                                       const size_t numSamples) {
+    std::vector<IndexT> result;
+    for (size_t idx = 0; idx < picovcf_div_ceiling<size_t, 8>(numSamples); idx++) {
+        samplesForBV<uint8_t>((uint8_t*)buffer, idx, result);
     }
     return std::move(result);
 }
@@ -1400,7 +1431,7 @@ public:
         const size_t base = getVariantFilePosition(variantIndex);
         m_infile.seekg(base + getGtOffset());
         PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-        const size_t readAmount = (numSamples() + 7) / 8;
+        const size_t readAmount = picovcf_div_ceiling<size_t, 8>(numSamples());
         PICOVCF_RELEASE_ASSERT(readAmount > 0);
         std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
         if (buffer) {
@@ -1457,7 +1488,7 @@ private:
     size_t getVariantFilePosition(size_t variantIndex) {
         const size_t sizePerVar =
             sizeof(uint64_t) +                                     // Position
-            ((m_header.numIndividuals * m_header.ploidy) + 7) / 8; // ceiling(GT data)
+            picovcf_div_ceiling<size_t, 8>(m_header.numIndividuals * m_header.ploidy); // ceiling(GT data)
         return m_beforeFirstVariant + (variantIndex * sizePerVar);
     }
 
@@ -1476,6 +1507,9 @@ private:
         m_beforeFirstVariant = m_infile.tellg();
         PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants > m_beforeFirstVariant,
                                    "Invalid variant info position " << m_header.filePosVariants);
+        PICOVCF_ASSERT_OR_MALFORMED(m_header.ploidy <= MAX_PLOIDY,
+                                   "Invalid ploidy " << m_header.ploidy << " is greater than maximum of "
+                                   << MAX_PLOIDY);
     }
 
     void readAllAlleleInfo() {
@@ -1599,6 +1633,7 @@ public:
                 isPhased ? IGDData::IGD_PHASED : 0x0,
                 0
             }) {
+        PICOVCF_ASSERT_OR_MALFORMED(ploidy <= MAX_PLOIDY, "Ploidy exceeded maximum supported");
     }
 
     /**

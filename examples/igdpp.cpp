@@ -38,6 +38,8 @@ int main(int argc, char *argv[]) {
         std::cout << "Stats for " << filename << std::endl;
         std::cout << "  Variants: " << igd.numVariants() << std::endl;
         std::cout << "  Individuals: " << igd.numIndividuals() << std::endl;
+        std::cout << "  Ploidy: " << igd.getPloidy() << std::endl;
+        std::cout << "  Phased?: " << (igd.isPhased() ? "true" : "false") << std::endl;
         std::cout << "  Source: " << igd.getSource() << std::endl;
         std::cout << "  Genome range: " << igd.getPosition(0)
                                         << "-" << igd.getPosition(igd.numVariants()-1) << std::endl;
