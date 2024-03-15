@@ -81,6 +81,41 @@ TEST(Helper, SerializeAlleleBits) {
     ASSERT_EQ(sampleSet, SampleList({15}));
 }
 
+// This method efficiently separates the samples in hetero/homozygous. Each heterozygous
+// is the specific sample, and each homozygous is just the first sample for the individual.
+TEST(Helper, SamplesByZygosity) {
+    using SampleList = std::vector<IndexT>;
+    InMemBuffer buffer(DEFAULT_BUFFER_SIZE);
+    std::ostream outStream(&buffer);
+
+    buffer.reset(DEFAULT_BUFFER_SIZE);
+    writeAllelesAsOnes(outStream, 1, {1, 1, 1, 1, 1, 1, 1, 1});
+    {
+        auto sampleLists =
+            getSamplesWithAltByZygosity((const uint8_t*)&buffer.m_buffer[0], 8, 2);
+        ASSERT_EQ(sampleLists.second, SampleList({0, 2, 4, 6}));
+        ASSERT_EQ(sampleLists.first, SampleList({}));
+    }
+
+    buffer.reset(DEFAULT_BUFFER_SIZE);
+    writeAllelesAsOnes(outStream, 1, {1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1});
+    {
+        auto sampleLists =
+            getSamplesWithAltByZygosity((const uint8_t*)&buffer.m_buffer[0], 14, 2);
+        ASSERT_EQ(sampleLists.second, SampleList({2, 6, 8}));
+        ASSERT_EQ(sampleLists.first, SampleList({0, 5, 13}));
+    }
+
+    buffer.reset(DEFAULT_BUFFER_SIZE);
+    writeAllelesAsOnes(outStream, 1, {1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1});
+    {
+        auto sampleLists =
+            getSamplesWithAltByZygosity((const uint8_t*)&buffer.m_buffer[0], 16, 2);
+        ASSERT_EQ(sampleLists.second, SampleList({14}));
+        ASSERT_EQ(sampleLists.first, SampleList({0, 7}));
+    }
+}
+
 TEST(Helper, BufferedReader) {
     std::string lineBuffer;
     std::vector<std::string> baseline;

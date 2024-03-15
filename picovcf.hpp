@@ -1207,6 +1207,55 @@ inline IGDSampleList getSamplesWithAlt(const uint8_t* buffer,
     return std::move(result);
 }
 
+// INTERNAL helper.
+inline std::pair<IGDSampleList, IGDSampleList> getSamplesWithAltByZygosity(
+        const uint8_t* buffer, const size_t numSamples, const size_t ploidy) {
+    std::pair<IGDSampleList, IGDSampleList> result;
+    PICOVCF_RELEASE_ASSERT(ploidy <= MAX_PLOIDY);
+    PICOVCF_RELEASE_ASSERT(ploidy > 1); // This function doesn't make sense for haploids.
+    size_t individualOffset = 0;
+    size_t zygosity = 0;
+
+    constexpr size_t bits = 8;
+    constexpr size_t mask = 0x1 << (bits - 1);
+    for (size_t idx = 0; idx < picovcf_div_ceiling<size_t, bits>(numSamples); idx++) {
+        uint8_t value = buffer[idx];
+        size_t bit = 0;
+        const size_t sampleOffset = idx * bits;
+        IndexT lastIndivOffset = 0; // Offset into result.first, for individual
+        IndexT lastIndividual = 0;
+        IndexT zygosity = 0;
+        while (value != 0) {
+            const bool isSet = (bool)(value & mask);
+            if (isSet) {
+                const IndexT sampleId = sampleOffset + bit;
+                const IndexT individual = (ploidy == 2) ? (sampleId >> 1) : (sampleId / ploidy);
+                if (individual != lastIndividual) {
+                    // Found a homozygote: move it from the heterozygous list.
+                    if (zygosity == ploidy) {
+                        const IndexT representativeSample = result.first[lastIndivOffset];
+                        result.first.resize(lastIndivOffset);
+                        result.second.push_back(representativeSample);
+                    }
+                    lastIndividual = individual;
+                    lastIndivOffset = result.first.size();
+                    zygosity = 0;
+                }
+                zygosity++;
+                result.first.push_back(sampleId);
+            }
+            value <<= 1U;
+            bit++;
+        }
+        if (zygosity == ploidy) {
+            const IndexT representativeSample = result.first[lastIndivOffset];
+            result.first.resize(lastIndivOffset);
+            result.second.push_back(representativeSample);
+        }
+    }
+    return std::move(result);
+}
+
 // INTERNAL CLASS
 // Compact representation of allele values.
 class IGDAllele {
@@ -1438,6 +1487,38 @@ public:
             m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
             PICOVCF_GOOD_OR_API_MISUSE(m_infile);
             return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples());
+        }
+        return {};
+    }
+
+    /**
+     * Get twos lists of samples that have the alternate allele for the given variant: one list is the specific
+     * samples that are heterozygotes, the other is a single sample representing the individual that is homozygous.
+     * NOTE: for unphased data, the "specific" sample that is heterozygous is random, and not the correct one since there
+     * is no phase.
+     *
+     * @param[in] variantIndex The 0-based index of the variant, i.e. the row number.
+     * @return A pair of lists (std::vector) of the sample indexes. Order is based on individual,
+     *      and then ploidy within the individual. E.g., the 0th diploid individual will
+     *      have sample indexes 0 and 1, the 1st will have 2 and 3, etc. The first list is the heterozygotes,
+     *      the second list is the homozygotes.
+     */
+    std::pair<IGDSampleList, IGDSampleList> getSamplesWithAltByZygosity(size_t variantIndex) {
+        const size_t base = getVariantFilePosition(variantIndex);
+        m_infile.seekg(base + getGtOffset());
+        PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+        const size_t readAmount = picovcf_div_ceiling<size_t, 8>(numSamples());
+        PICOVCF_RELEASE_ASSERT(readAmount > 0);
+        std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
+        if (buffer) {
+            m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
+            PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+            if (m_header.ploidy == 1) {
+                std::pair<IGDSampleList, IGDSampleList> result;
+                result.first = ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples());
+                return std::move(result);
+            }
+            return ::picovcf::getSamplesWithAltByZygosity((const uint8_t*)buffer.get(), numSamples(), m_header.ploidy);
         }
         return {};
     }
