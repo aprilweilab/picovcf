@@ -56,7 +56,6 @@ TEST(Helpers, Split) {
 
 
 TEST(Helper, SerializeAlleleBits) {
-    using SampleList = std::vector<IndexT>;
     InMemBuffer buffer(DEFAULT_BUFFER_SIZE);
     std::ostream outStream(&buffer);
 
@@ -64,21 +63,21 @@ TEST(Helper, SerializeAlleleBits) {
     ASSERT_EQ((uint8_t)buffer.m_buffer[0], 0xFF);
     ASSERT_EQ((uint8_t)buffer.m_buffer[1], 0x00);
     auto sampleSet = getSamplesWithAlt((const uint8_t*)&buffer.m_buffer[0], 8);
-    ASSERT_EQ(sampleSet, SampleList({0, 1, 2, 3, 4, 5, 6, 7}));
+    ASSERT_EQ(sampleSet, IGDSampleList({0, 1, 2, 3, 4, 5, 6, 7}));
 
     buffer.reset(DEFAULT_BUFFER_SIZE);
     writeAllelesAsOnes(outStream, {0, 1, 2, 5, 6, 7, 8}, 10);
     ASSERT_EQ((uint8_t)buffer.m_buffer[0], 0xE7);
     ASSERT_EQ((uint8_t)buffer.m_buffer[1], 0x80);
     sampleSet = getSamplesWithAlt((const uint8_t*)&buffer.m_buffer[0], 10);
-    ASSERT_EQ(sampleSet, SampleList({0, 1, 2, 5, 6, 7, 8}));
+    ASSERT_EQ(sampleSet, IGDSampleList({0, 1, 2, 5, 6, 7, 8}));
 
     buffer.reset(DEFAULT_BUFFER_SIZE);
     writeAllelesAsOnes(outStream, {15}, 16);
     ASSERT_EQ((uint8_t)buffer.m_buffer[0], 0x00);
     ASSERT_EQ((uint8_t)buffer.m_buffer[1], 0x01);
     sampleSet = getSamplesWithAlt((const uint8_t*)&buffer.m_buffer[0], 16);
-    ASSERT_EQ(sampleSet, SampleList({15}));
+    ASSERT_EQ(sampleSet, IGDSampleList({15}));
 }
 
 TEST(Helper, BufferedReader) {

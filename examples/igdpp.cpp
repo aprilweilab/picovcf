@@ -14,7 +14,7 @@
 
 using namespace picovcf;
 
-inline void emitAllele(IndexT alleleIndex, std::ostream& out) {
+inline void emitAllele(VariantT alleleIndex, std::ostream& out) {
     if (alleleIndex == MISSING_VALUE) {
         out << "? ";
     } else {

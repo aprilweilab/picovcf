@@ -29,8 +29,8 @@ TEST(ValidVCF, SpecExample) {
         VCFVariantView variant = vcf.currentVariant();
         IndividualIteratorGT iterator = variant.getIndividualIterator();
         while (iterator.hasNext()) {
-            IndexT allele1 = 0;
-            IndexT allele2 = 0;
+            VariantT allele1 = 0;
+            VariantT allele2 = 0;
             iterator.getAlleles(allele1, allele2);
         }
     }
@@ -93,9 +93,7 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_TRUE(variant4.hasGenotypeData());
 }
 
-using SampleList = std::vector<IndexT>;
-
-static bool hasSample(const SampleList& samples, IndexT id) {
+static bool hasSample(const IGDSampleList& samples, SampleT id) {
     for (auto sampleId : samples) {
         if (id == sampleId) {
             return true;
@@ -133,10 +131,10 @@ TEST(ValidVCF, Indexable) {
         ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index, isMissing));
         auto sampleSet = indexableData.getSamplesWithAlt(index);
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
-        size_t sampleIndex = 0;
+        SampleT sampleIndex = 0;
         while (individualIt.hasNext()) {
-            IndexT allele1 = 255;
-            IndexT allele2 = 255;
+            VariantT allele1 = 255;
+            VariantT allele2 = 255;
             individualIt.getAlleles(allele1, allele2);
             if (allele1 == 1) {
                 if (!hasSample(sampleSet, sampleIndex)) {
