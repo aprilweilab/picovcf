@@ -43,32 +43,35 @@ int main(int argc, char *argv[]) {
         std::cout << "  Source: " << igd.getSource() << std::endl;
         std::cout << "  Genome range: " << igd.getPosition(0)
                                         << "-" << igd.getPosition(igd.numVariants()-1) << std::endl;
-        auto missingData = igd.getMissingData();
-        std::cout << "  Variants with missing data: " << missingData.size() << std::endl;
-        size_t missingAlleles = 0;
-        for (const auto& varIdxAndSampleList : missingData) {
-            missingAlleles += varIdxAndSampleList.second.size();
-        }
-        std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
-
         std::cout << "  Has individual IDs? " << (igd.getIndividualIds().empty() ? "No" : "Yes") << std::endl;
     } else if (command == "range_stats") {
         std::cout << "Stats for " << filename << std::endl;
-        size_t firstPos = igd.getPosition(0);
-        size_t lastPos = igd.getPosition(igd.numVariants()-1);
+        bool _ignore = false;
+        size_t firstPos = igd.getPosition(0, _ignore);
+        size_t lastPos = igd.getPosition(igd.numVariants()-1, _ignore);
         uint32_t start = (argc > 3) ? atoi(argv[3]) : firstPos;
         uint32_t end = (argc > 4) ? atoi(argv[4]) : lastPos + 1;
         size_t variants = 0;
+        size_t missingRows = 0;
+        size_t missingAlleles = 0;
         std::vector<size_t> samplesPerVariant;
         size_t sampleRefsTotal = 0;
         std::vector<size_t> sampleToMuts(igd.numSamples()); // Counts muts per sample
         for (size_t i = 0; i < igd.numVariants(); i++) {
-            auto pos = igd.getPosition(i);
+            bool isMissing = false;
+            auto pos = igd.getPosition(i, isMissing);
             if (pos >= start && pos < end) {
                 variants++;
                 auto sampleList = igd.getSamplesWithAlt(i);
+                if (isMissing) {
+                    missingRows++;
+                }
                 for (auto sampleId : sampleList) {
-                    sampleToMuts.at(sampleId)++;
+                    if (!isMissing) {
+                        sampleToMuts.at(sampleId)++;
+                    } else {
+                        missingAlleles++;
+                    }
                 }
                 auto sampleCt = sampleList.size();
                 samplesPerVariant.push_back(sampleCt);
@@ -100,13 +103,19 @@ int main(int argc, char *argv[]) {
         }
         stddevMuts = sqrt(stddevMuts/(double)igd.numSamples());
         std::cout << "  Stddev var/sample: " << stddevMuts << std::endl;
+    
+        std::cout << "  Variants with missing data: " << missingRows << std::endl;
+        std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
+
+
     } else if (command == "freq") {
         static constexpr char SEP = '\t';
         std::cout << "POSITION" << SEP << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP << "TOTAL" << std::endl;
         for (size_t i = 0; i < igd.numVariants(); i++) {
-            auto pos = igd.getPosition(i);
+            bool isMissing = false;
+            auto pos = igd.getPosition(i, isMissing);
             auto sampleList = igd.getSamplesWithAlt(i);
-            std::cout << igd.getPosition(i) << SEP << igd.getRefAllele(i) << SEP
+            std::cout << pos << SEP << igd.getRefAllele(i) << SEP
                 << igd.getAltAllele(i) << SEP << sampleList.size() << SEP << igd.numSamples() << std::endl;
         }
     }

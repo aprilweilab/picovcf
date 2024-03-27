@@ -120,7 +120,8 @@ TEST(ValidVCF, Indexable) {
     ASSERT_EQ(indexableData.numVariants(), EXPECT_VARIANTS);
     ASSERT_EQ(indexableData.numIndividuals(), EXPECT_INDIVIDUALS);
     ASSERT_EQ(indexableData.numSamples(), 2*EXPECT_INDIVIDUALS);
-    ASSERT_EQ(indexableData.getPosition(0), 55829);
+    bool _ignore = false;
+    ASSERT_EQ(indexableData.getPosition(0, _ignore), 55829);
 
     size_t index = 0;
     vcf.seekBeforeVariants();
@@ -128,7 +129,8 @@ TEST(ValidVCF, Indexable) {
         vcf.nextVariant();
         VCFVariantView& variant = vcf.currentVariant();
         ASSERT_FALSE(variant.getAltAlleles().size() > 1);
-        ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index));
+        bool isMissing = false;
+        ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index, isMissing));
         auto sampleSet = indexableData.getSamplesWithAlt(index);
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
         size_t sampleIndex = 0;
@@ -137,6 +139,10 @@ TEST(ValidVCF, Indexable) {
             IndexT allele2 = 255;
             individualIt.getAlleles(allele1, allele2);
             if (allele1 == 1) {
+                if (!hasSample(sampleSet, sampleIndex)) {
+                    std::cout << "Variant " << index << " failed: ";
+                    std::cout << "missing sample " << sampleIndex << "\n";
+                }
                 ASSERT_TRUE(hasSample(sampleSet, sampleIndex));
             }
             sampleIndex++;

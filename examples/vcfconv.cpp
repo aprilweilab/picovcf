@@ -17,6 +17,6 @@ int main(int argc, char *argv[]) {
 
     const std::string infile(argv[1]);
     const std::string outfile(argv[2]);
-    vcfToIGD(infile, outfile);
+    vcfToIGD(infile, outfile, "", true);
     return 0;
 }
