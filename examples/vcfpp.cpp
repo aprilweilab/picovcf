@@ -12,7 +12,7 @@
 
 using namespace picovcf;
 
-inline void emitAllele(IndexT alleleIndex, std::ostream& out) {
+inline void emitAllele(VariantT alleleIndex, std::ostream& out) {
     if (alleleIndex == MISSING_VALUE) {
         out << "? ";
     } else {
@@ -55,8 +55,8 @@ int main(int argc, char *argv[]) {
             VCFVariantView variant = vcf.currentVariant();
             IndividualIteratorGT iterator = variant.getIndividualIterator();
             while (iterator.hasNext()) {
-                IndexT allele1 = 0;
-                IndexT allele2 = 0;
+                VariantT allele1 = 0;
+                VariantT allele2 = 0;
                 bool isPhased = iterator.getAlleles(allele1, allele2);
                 if (!isPhased) {
                     std::cerr << "Cannot create a matrix for unphased data" << std::endl;
