@@ -66,14 +66,14 @@ int main(int argc, char *argv[]) {
             auto pos = igd.getPosition(i);
             if (pos >= start && pos < end) {
                 variants++;
+                auto sampleList = igd.getSamplesWithAlt(i);
+                for (auto sampleId : sampleList) {
+                    sampleToMuts.at(sampleId)++;
+                }
+                auto sampleCt = sampleList.size();
+                samplesPerVariant.push_back(sampleCt);
+                sampleRefsTotal += sampleCt;
             }
-            auto sampleList = igd.getSamplesWithAlt(i);
-            for (auto sampleId : sampleList) {
-                sampleToMuts.at(sampleId)++;
-            }
-            auto sampleCt = sampleList.size();
-            samplesPerVariant.push_back(sampleCt);
-            sampleRefsTotal += sampleCt;
         }
         std::cout << "... in range " << start << " - " << end << std::endl;
         std::cout << "  Variants in range: " << variants << std::endl;
