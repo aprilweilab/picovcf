@@ -29,21 +29,28 @@
 
 namespace picovcf {
 
-/** Represents an index, such as the index of an individual or sample. */
-using IndexT = size_t;
+// With these type sizes, we support up to 4 billion samples, and trillions of variants.
+
+/** Represents the index of an individual or sample. */
+using SampleT = uint32_t;
+static constexpr size_t MAX_SAMPLES = std::numeric_limits<SampleT>::max() - 1;
+static constexpr SampleT SAMPLE_INDEX_NOT_SET = std::numeric_limits<SampleT>::max();
+
+/** Represents the index of a variant. */
+using VariantT = uint64_t;
 
 /** Pair of integers that define a range */
-using RangePair = std::pair<IndexT, IndexT>;
+using RangePair = std::pair<VariantT, VariantT>;
 
 /** Pair of integers that define a non-reference allele (mutation) value: variant row index
  * and alt allele index (0-based, so 0 is the first non-reference allele value). */
-using MutationPair = std::pair<IndexT, IndexT>;
+using MutationPair = std::pair<VariantT, VariantT>;
 
 /** When processing pairs of alleles, this is used for the second item for haploids */
-static constexpr size_t NOT_DIPLOID = std::numeric_limits<IndexT>::max();
+static constexpr VariantT NOT_DIPLOID = std::numeric_limits<VariantT>::max();
 
 /** Represents a missing allele value (e.g., "." in VCF nomenclature) */
-static constexpr size_t MISSING_VALUE = std::numeric_limits<IndexT>::max() - 1;
+static constexpr VariantT MISSING_VALUE = std::numeric_limits<VariantT>::max() - 1;
 
 static constexpr size_t INTERNAL_VALUE_NOT_SET = std::numeric_limits<size_t>::max();
 
@@ -427,7 +434,7 @@ inline bool picovcf_peek_eof(BufferedReader* instream) {
     return instream->eof() || instream->peek_eof();
 }
 
-inline bool isMutation(IndexT alleleIndex) {
+inline bool isMutation(VariantT alleleIndex) {
     return (alleleIndex != MISSING_VALUE) && (alleleIndex != 0);
 }
 
@@ -462,7 +469,7 @@ public:
      *      the next one.
      * @returns true if the aleles are phased, false if they are not (or it is a haploid).
      */
-    bool getAlleles(IndexT& allele1, IndexT& allele2, bool moveNext = true) {
+    bool getAlleles(VariantT& allele1, VariantT& allele2, bool moveNext = true) {
         if (m_currentPosition == std::string::npos) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Iterator is at end of individuals");
         }
@@ -476,11 +483,11 @@ public:
         // These are the two fast paths (haploid + diploid)
         bool isPhased = true;
         if (length == 1) {
-            allele1 = singleCharToIndexT(m_currentLine[m_currentPosition]);
+            allele1 = singleCharToVariantT(m_currentLine[m_currentPosition]);
             allele2 = NOT_DIPLOID;
         } else if (length == 3) {
-            allele1 = singleCharToIndexT(m_currentLine[m_currentPosition]);
-            allele2 = singleCharToIndexT(m_currentLine[m_currentPosition+2]);;
+            allele1 = singleCharToVariantT(m_currentLine[m_currentPosition]);
+            allele2 = singleCharToVariantT(m_currentLine[m_currentPosition+2]);;
             isPhased = m_currentLine[m_currentPosition+1] == PHASED_SEPARATOR;
         } else {
             std::string alleles = m_currentLine.substr(m_currentPosition, length);
@@ -492,8 +499,8 @@ public:
             picovcf_split(alleles, splitChar, alleleStrings);
             PICOVCF_ASSERT_OR_MALFORMED(alleleStrings.size() == 2,
                                         "Invalid allele string: " << alleles << "\nAt line: " << m_currentLine);
-            allele1 = stringToIndexT(alleleStrings[0]);
-            allele2 = stringToIndexT(alleleStrings[1]);
+            allele1 = stringToVariantT(alleleStrings[0]);
+            allele2 = stringToVariantT(alleleStrings[1]);
             isPhased = (splitChar == PHASED_SEPARATOR);
         }
         if (moveNext) {
@@ -523,7 +530,7 @@ private:
             , m_individualIndex(0) {
     }
 
-    static inline IndexT singleCharToIndexT(char c) {
+    static inline VariantT singleCharToVariantT(char c) {
         switch (c) {
             case '0':
                 return 0;
@@ -551,12 +558,12 @@ private:
         PICOVCF_THROW_ERROR(MalformedFile, "Invalid allele value: " << c);
     }
 
-    static inline IndexT stringToIndexT(const std::string& str) {
+    static inline VariantT stringToVariantT(const std::string& str) {
         if (str == ".") {
             return MISSING_VALUE;
         }
         char* endPtr = nullptr;
-        IndexT result = static_cast<uint32_t>(std::strtoull(str.c_str(), &endPtr, 10));
+        VariantT result = static_cast<uint32_t>(std::strtoull(str.c_str(), &endPtr, 10));
         if (endPtr != (str.c_str() + str.size())) {
             PICOVCF_THROW_ERROR(MalformedFile, "Invalid allele value: " << str);
         }
@@ -567,7 +574,7 @@ private:
     const std::string& m_currentLine;
     size_t m_currentPosition;
     // The 0-based index of the current individual.
-    IndexT m_individualIndex;
+    SampleT m_individualIndex;
 
     friend class VCFVariantView;
 };
@@ -1035,7 +1042,7 @@ public:
         }
         auto prevFilePosition = this->getFilePosition();
         const size_t numIndividuals =
-            std::min(totalIndividuals, individualRange.second) - individualRange.first;
+            std::min<size_t>(totalIndividuals, individualRange.second) - individualRange.first;
         result.firstIndividual = individualRange.first;
         result.sampleToMutation.clear();
         result.parsedVariants.clear();
@@ -1053,7 +1060,7 @@ public:
 
                 for (size_t i = 0; i < (individualRange.second - individualRange.first)
                                    && iterator.hasNext(); i++, iterator.next()) {
-                    size_t allele1 = 0, allele2 = 0;
+                    VariantT allele1 = 0, allele2 = 0;
                     iterator.getAlleles(allele1, allele2, /*moveNext=*/false);
                     if (result.sampleToMutation.empty()) {
                         result.isDiploid = (allele2 != NOT_DIPLOID);
@@ -1173,23 +1180,23 @@ static inline T readScalar(std::istream& inStream) {
 }
 
 /** Vector of sample indexes (IDs) */
-using IGDSampleList = std::vector<IndexT>;
+using IGDSampleList = std::vector<SampleT>;
 
 // NOTE: in order to use this for larger than byte at a time, some more math is needed to adjust
 // the sample IDs. This is more robust to uniformly distributed bits than other methods, in that
 // it skips 0 bytes and skips 0-prefixes.
 template <typename T>
-inline void samplesForBV(const T* buffer, size_t index, std::vector<IndexT>& result) {
-    constexpr size_t bits = sizeof(T)*8;
-    constexpr size_t mask = 0x1 << (bits - 1);
+inline void samplesForBV(const T* buffer, SampleT index, IGDSampleList& result) {
+    constexpr SampleT bits = sizeof(T)*8;
+    constexpr SampleT mask = 0x1 << (bits - 1);
     static_assert(sizeof(T) == 1, "More math needed to support larger types");
     T value = buffer[index];
-    size_t bit = 0;
-    const size_t sampleOffset = index * bits;
+    SampleT bit = 0;
+    const SampleT sampleOffset = index * bits;
     while (value != 0) {
         const bool isSet = (bool)(value & mask);
         if (isSet) {
-            const IndexT sampleId = sampleOffset + bit;
+            const SampleT sampleId = sampleOffset + bit;
             result.push_back(sampleId);
         }
         value <<= 1U;
@@ -1199,9 +1206,9 @@ inline void samplesForBV(const T* buffer, size_t index, std::vector<IndexT>& res
 
 // INTERNAL helper.
 inline IGDSampleList getSamplesWithAlt(const uint8_t* buffer,
-                                       const size_t numSamples) {
-    std::vector<IndexT> result;
-    for (size_t idx = 0; idx < picovcf_div_ceiling<size_t, 8>(numSamples); idx++) {
+                                       const SampleT numSamples) {
+    IGDSampleList result;
+    for (SampleT idx = 0; idx < picovcf_div_ceiling<SampleT, 8>(numSamples); idx++) {
         samplesForBV<uint8_t>((uint8_t*)buffer, idx, result);
     }
     return std::move(result);
@@ -1265,7 +1272,10 @@ public:
     /** Flag that indicates the genotype data is phased */
     static constexpr uint64_t IGD_PHASED = 0x1;
     /** The IGD file format version that this library writes */
-    static constexpr uint64_t CURRENT_IGD_VERSION = 2;
+    static constexpr uint64_t CURRENT_IGD_VERSION = 3;
+    /** If fewer than NumSamples/DEFAULT_SPARSE_THRESHOLD samples have a particular variant, we will
+        store it sparsely. */
+    static constexpr uint32_t DEFAULT_SPARSE_THRESHOLD = 128;
 
     /* File format.
      * - FixedHeader (128 bytes)
@@ -1287,17 +1297,35 @@ public:
      */
 #pragma pack(push, 1)
     struct FixedHeader {
-        uint64_t magic;
-        uint64_t version;
-        uint64_t ploidy;
-        uint64_t numVariants;
-        uint64_t numIndividuals;
-        uint64_t flags;
-        uint64_t filePosVariants;
-        uint64_t filePosMissingData;
-        uint64_t filePosIndividualIds;
+        uint64_t magic;                 // Magic identifier to say this is an IGD file.
+        uint64_t version;               // IGD file format version.
+        uint32_t ploidy;                // Ploidy of every individual.
+        uint32_t sparseThreshold;       // Number of samples below which we store a variant sparsely.
+        uint64_t numVariants;           // Total number of variants.
+        uint64_t numIndividuals;        // Total number of individuals.
+        uint64_t flags;                 // Flags that indicate properties of the dataset.
+        uint64_t filePosIndex;          // Byte offset in the file where the variant rows start.
+        uint64_t filePosVariants;       // Byte offset in the file where the variant allele information start.
+        uint64_t filePosIndividualIds;  // Byte offset in the file where the identifiers for individuals start.
         uint64_t unused[7];
     };
+    static_assert(sizeof(FixedHeader) == 128, "Header size is fixed");
+
+    // Bitfields are undefined in the C standard how they are laid out in memory, so we can't rely on
+    // them for a consistent serialization format. Instead we "steal" the upper byte of the bpPosition
+    // to store whether or not the row at the given position is sparse.
+    enum {
+        BP_POS_FLAGS_MASK = 0xFF00000000000000,
+
+        BP_POS_FLAGS_SPARSE = 0x0100000000000000,
+        BP_POS_FLAGS_IS_MISSING = 0x0200000000000000,
+    };
+
+    struct IndexEntry {
+        uint64_t bpPosition;        // The base-pair position of the variant.
+        uint64_t filePosDataRow;    // Byte offset in the file where the corresponding row is (samples containing variant).
+    };
+    static_assert(sizeof(IndexEntry) == 16, "IndexEntry is fixed size");
 #pragma pack(pop)
 
     /**
@@ -1309,7 +1337,9 @@ public:
      */
     explicit IGDData(const std::string& filename)
             : m_infile(filename, std::ios::binary)
-            , m_header({0, 0, 0, 0, 0, 0,
+            , m_header({0, 0, 0, 0, 0, 0, 0,
+                        std::numeric_limits<uint64_t>::max(),
+                        std::numeric_limits<uint64_t>::max(),
                         std::numeric_limits<uint64_t>::max(),
                         std::numeric_limits<uint64_t>::max()})
             , m_beforeFirstVariant(0) {
@@ -1330,7 +1360,7 @@ public:
      * The number of individuals represented in the genotype data.
      * @return Number of individuals.
      */
-    uint64_t numIndividuals() const {
+    VariantT numIndividuals() const {
         return m_header.numIndividuals;
     }
 
@@ -1338,7 +1368,7 @@ public:
      * IGD files have a fixed ploidy, so this is just getPloidy()*numIndividuals()
      * @return Number of samples (haplotypes).
      */
-    uint64_t numSamples() const {
+    SampleT numSamples() const {
         return m_header.numIndividuals * m_header.ploidy;
     }
 
@@ -1371,9 +1401,27 @@ public:
      * @return A pair of the minimum and maximum variant positions present in the file.
      */
     RangePair getGenomeRange() {
-        size_t firstPosition = this->getPosition(0);
-        size_t lastPosition = this->getPosition(this->numVariants() - 1);
+        bool _ignore = false;
+        VariantT firstPosition = this->getPosition(0, _ignore);
+        VariantT lastPosition = this->getPosition(this->numVariants() - 1, _ignore);
         return {firstPosition, lastPosition};
+    }
+
+    // TODO: would be nice to read position and "is missing" together, so clients can skip
+    // missing data if desired.
+
+    /**
+     * Get the position of the given variant.
+     * @param[in] variantIndex The 0-based index of the variant, i.e. the row number.
+     * @return The position of the variant on the genome.
+     */
+    uint64_t getPosition(VariantT variantIndex, bool &isMissing) {
+        const size_t offset = getVariantIndexOffset(variantIndex);
+        m_infile.seekg(offset);
+        PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+        uint64_t position = readScalar<uint64_t>(m_infile);
+        isMissing = (bool)(position & BP_POS_FLAGS_IS_MISSING);
+        return (position & ~BP_POS_FLAGS_MASK);
     }
 
     /**
@@ -1381,11 +1429,9 @@ public:
      * @param[in] variantIndex The 0-based index of the variant, i.e. the row number.
      * @return The position of the variant on the genome.
      */
-    uint64_t getPosition(size_t variantIndex) {
-        const size_t base = getVariantFilePosition(variantIndex);
-        m_infile.seekg(base + getPositionOffset());
-        PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-        return readScalar<uint64_t>(m_infile);
+    uint64_t getPosition(VariantT variantIndex) {
+        bool _ignore = false;
+        return getPosition(variantIndex, _ignore);
     }
 
     /**
@@ -1393,7 +1439,8 @@ public:
      * @param[in] variantIndex The 0-based index of the variant, i.e. the row number.
      * @return The string representing the alternative allele of the variant.
      */
-    std::string getAltAllele(size_t variantIndex) {
+    std::string getAltAllele(VariantT variantIndex) {
+        // TODO: do we really want to read these all at once?
         if (m_alternateAlleles.empty()) {
             readAllAlleleInfo();
         }
@@ -1409,7 +1456,8 @@ public:
      * @param[in] variantIndex The 0-based index of the variant, i.e. the row number.
      * @return The string representing the reference allele of the variant.
      */
-    std::string getRefAllele(size_t variantIndex) {
+    std::string getRefAllele(VariantT variantIndex) {
+        // TODO: do we really want to read these all at once?
         if (m_referenceAlleles.empty()) {
             readAllAlleleInfo();
         }
@@ -1427,33 +1475,35 @@ public:
      *      and then ploidy within the individual. E.g., the 0th diploid individual will
      *      have sample indexes 0 and 1, the 1st will have 2 and 3, etc.
      */
-    std::vector<IndexT> getSamplesWithAlt(size_t variantIndex) {
-        const size_t base = getVariantFilePosition(variantIndex);
-        m_infile.seekg(base + getGtOffset());
+    IGDSampleList getSamplesWithAlt(VariantT variantIndex) {
+        const size_t base = getVariantIndexOffset(variantIndex);
+        m_infile.seekg(base);
         PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-        const size_t readAmount = picovcf_div_ceiling<size_t, 8>(numSamples());
-        PICOVCF_RELEASE_ASSERT(readAmount > 0);
-        std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
-        if (buffer) {
-            m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
-            PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-            return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples());
+        IndexEntry index;
+        m_infile.read(reinterpret_cast<char*>(&index), sizeof(index));
+        const bool isSparse = (bool)(index.bpPosition & BP_POS_FLAGS_SPARSE);
+
+        m_infile.seekg(index.filePosDataRow);
+        PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+        if (isSparse) {
+            const SampleT numSamples = readScalar<SampleT>(m_infile);
+            PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
+            IGDSampleList sampleList(numSamples);
+            for (SampleT j = 0; j < numSamples; j++) {
+                sampleList[j] = readScalar<SampleT>(m_infile);
+            }
+            return std::move(sampleList);
+        } else {
+            const SampleT readAmount = picovcf_div_ceiling<SampleT, 8>(numSamples());
+            PICOVCF_RELEASE_ASSERT(readAmount > 0);
+            std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
+            if (buffer) {
+                m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
+                PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+                return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples());
+            }
         }
         return {};
-    }
-
-    /**
-     * This reads _all_ of the missing data, for all variants, into memory.
-     * Missing data is assumed to be sparse enough that this is practical even on large
-     * datasets.
-     * @return a map from variant index to a list of samples that are missing data for that
-     *      variant.
-     */
-    const std::unordered_map<IndexT, std::vector<IndexT>>& getMissingData() {
-        if (m_variantToMissingSamples.empty()) {
-            readAllMissingData();
-        }
-        return m_variantToMissingSamples;
     }
 
     /**
@@ -1476,20 +1526,8 @@ public:
         return result;
     }
 private:
-    size_t getPositionOffset() const {
-        return 0;
-    }
-
-    size_t getGtOffset() const {
-        return getPositionOffset() +
-               sizeof(uint64_t);              // Position
-    }
-
-    size_t getVariantFilePosition(size_t variantIndex) {
-        const size_t sizePerVar =
-            sizeof(uint64_t) +                                     // Position
-            picovcf_div_ceiling<size_t, 8>(m_header.numIndividuals * m_header.ploidy); // ceiling(GT data)
-        return m_beforeFirstVariant + (variantIndex * sizePerVar);
+    size_t getVariantIndexOffset(VariantT variantIndex) {
+        return m_header.filePosIndex + (variantIndex * sizeof(IndexEntry));
     }
 
     void readAndCheckHeader() {
@@ -1510,6 +1548,8 @@ private:
         PICOVCF_ASSERT_OR_MALFORMED(m_header.ploidy <= MAX_PLOIDY,
                                    "Invalid ploidy " << m_header.ploidy << " is greater than maximum of "
                                    << MAX_PLOIDY);
+        PICOVCF_ASSERT_OR_MALFORMED(m_header.numIndividuals <= MAX_SAMPLES / m_header.ploidy,
+                                   "Too many individuals to store: " << m_header.numIndividuals);
     }
 
     void readAllAlleleInfo() {
@@ -1519,7 +1559,7 @@ private:
         PICOVCF_RELEASE_ASSERT(m_alternateAlleles.empty());
         m_referenceAlleles.reserve(m_header.numVariants);
         m_alternateAlleles.reserve(m_header.numVariants);
-        for (size_t i = 0; i < m_header.numVariants; i++) {
+        for (VariantT i = 0; i < m_header.numVariants; i++) {
             std::string reference;
             const size_t refLen = readScalar<uint64_t>(m_infile);
             PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
@@ -1547,24 +1587,6 @@ private:
         m_longAlleles.shrink_to_fit();
     }
 
-    void readAllMissingData() {
-        m_infile.seekg(m_header.filePosMissingData);
-        PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
-        PICOVCF_RELEASE_ASSERT(m_variantToMissingSamples.empty());
-        // Read the number of variants that have missing data.
-        const size_t numVariantsWithMissing = readScalar<uint64_t>(m_infile);
-        for (size_t i = 0; i < numVariantsWithMissing; i++) {
-            const IndexT variantIndex = static_cast<IndexT>(readScalar<uint64_t>(m_infile));
-            const size_t numSamples = readScalar<uint64_t>(m_infile);
-            PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
-            std::vector<IndexT> sampleList(numSamples);
-            for (size_t j = 0; j < numSamples; j++) {
-                sampleList[j] = readScalar<uint64_t>(m_infile);
-            }
-            m_variantToMissingSamples.emplace(variantIndex, std::move(sampleList));
-        }
-    }
-
     std::ifstream m_infile;
     FixedHeader m_header;
     std::string m_source;
@@ -1577,11 +1599,6 @@ private:
     std::vector<IGDAllele> m_alternateAlleles;
     // Separate vector for storing the "long" alleles (larger than 4 nucleotides)
     std::vector<std::string> m_longAlleles;
-
-    // Missing data is expected to be very sparse, so it is stored separately and read all at once.
-    // The key to this map is a variant index, the value is the list of sample indexes that had missing
-    // data for that variant.
-    std::unordered_map<IndexT, std::vector<IndexT>> m_variantToMissingSamples;
 };
 
 template <typename T>
@@ -1590,20 +1607,34 @@ static inline void writeScalar(T intValue, std::ostream& outStream) {
 }
 
 inline void writeAllelesAsOnes(std::ostream& outStream,
-                               IndexT alleleIndex,
-                               const std::vector<IndexT>& alleleIndexes) {
+                               const IGDSampleList& orderedSampleList,
+                               SampleT numSamples) {
+    // XXX this can be majorly optimized.
     uint8_t buffer = 0x0;
-    const size_t count = alleleIndexes.size();
-    for (size_t j = 0; j < count; j++) {
+    SampleT i = 0;
+    SampleT j = 0;
+    SampleT nextSample = SAMPLE_INDEX_NOT_SET;
+    if (i < orderedSampleList.size()) {
+        nextSample = orderedSampleList[i];
+        i++;
+    }
+    while (j < numSamples) {
         if (j != 0 && j % 8 == 0) {
             writeScalar<uint8_t>(buffer, outStream);
         }
         buffer <<= 1;
-        if (alleleIndexes[j] == alleleIndex) {
+        if (j == nextSample) {
             buffer |= 0x1;
+            if (i < orderedSampleList.size()) {
+                nextSample = orderedSampleList[i];
+                i++;
+            } else {
+                nextSample = SAMPLE_INDEX_NOT_SET;
+            }
         }
+        j++;
     }
-    size_t leftover = count % 8;
+    SampleT leftover = numSamples % 8;
     if (leftover > 0) {
         buffer <<= (8 - leftover);
     }
@@ -1621,17 +1652,21 @@ public:
      * @param[in] numIndividuals The number of individuals with genotype data.
      * @param[in] isPhased True if the data is phased, false otherwise.
      */
-    IGDWriter(uint64_t ploidy,
+    IGDWriter(uint32_t ploidy,
               uint64_t numIndividuals,
               bool isPhased)
             : m_header({
                 IGDData::IGD_MAGIC,
                 IGDData::CURRENT_IGD_VERSION,
                 ploidy,
+                IGDData::DEFAULT_SPARSE_THRESHOLD,
                 0,
                 numIndividuals,
                 isPhased ? IGDData::IGD_PHASED : 0x0,
-                0
+                0,
+                0,
+                0,
+                0,
             }) {
         PICOVCF_ASSERT_OR_MALFORMED(ploidy <= MAX_PLOIDY, "Ploidy exceeded maximum supported");
     }
@@ -1665,32 +1700,40 @@ public:
      *      matches the altAllele at (value - 1) in the altAlleles vector. If data is missing for
      *      a particular sample, then use picovcf::MISSING_VALUE at that index.
      */
-    void writeSamplesRow(std::ostream& outStream,
-                         const uint64_t genomePosition,
-                         const std::string& referenceAllele,
-                         const std::vector<std::string>& altAlleles,
-                         const std::vector<IndexT>& alleleIndexes) {
-        assert(alleleIndexes.size() % m_header.ploidy == 0);
-        assert(alleleIndexes.size() / m_header.ploidy == m_header.numIndividuals);
-        const size_t seekBeforeVariantsIndex = m_header.numVariants;
-        for (size_t i = 1; i <= altAlleles.size(); i++) {
-            const std::string& alt = altAlleles[i-1];
-            m_referenceAlleles.emplace_back(referenceAllele);
-            m_alternateAlleles.emplace_back(alt);
-            writeScalar<uint64_t>(genomePosition, outStream);
-            writeAllelesAsOnes(outStream, i, alleleIndexes);
-            m_header.numVariants++;
+    void writeVariantSamples(std::ostream& outStream,
+                             const uint64_t genomePosition,
+                             const std::string& referenceAllele,
+                             const std::string& altAllele,
+                             const IGDSampleList& sampleList,
+                             const bool isMissing = false) {
+        const SampleT numSamples = (m_header.ploidy * m_header.numIndividuals);
+        const VariantT variantIndex = m_header.numVariants;
+        assert(sampleList.size() <= numSamples);
+
+        m_referenceAlleles.emplace_back(referenceAllele);
+        m_alternateAlleles.emplace_back(altAllele);
+
+        const bool isSparse = (sampleList.size() <=  (numSamples / IGDData::DEFAULT_SPARSE_THRESHOLD));
+        m_index.push_back(std::move(makeEntry(genomePosition, isSparse, isMissing, outStream.tellp())));
+        if (isSparse) {
+            writeSparse(outStream, sampleList);
+            m_sparseCount++;
+        } else {
+            writeAllelesAsOnes(outStream, sampleList, numSamples);
         }
-        if (!altAlleles.empty()) {
-            std::vector<IndexT> missingSamples;
-            for (size_t sampleId = 0; sampleId < alleleIndexes.size(); sampleId++) {
-                if (alleleIndexes[sampleId] == MISSING_VALUE) {
-                    missingSamples.push_back(sampleId);
-                }
-            }
-            if (!missingSamples.empty()) {
-                m_variantToMissingSamples.emplace(seekBeforeVariantsIndex, std::move(missingSamples));
-            }
+        m_header.numVariants++;
+        m_totalCount++;
+    }
+
+    /**
+     * Write the table of information about the variants. This information is collected and saved
+     * by writeSamplesRow(), so this function must be called _after_ that one.
+     * @param[in] outStream The output stream.
+     */
+    void writeIndex(std::ostream& outStream) {
+        m_header.filePosIndex = outStream.tellp();
+        for (VariantT i = 0; i < m_index.size(); i++) {
+            outStream.write((const char*)&m_index[i], sizeof(m_index[i]));
         }
     }
 
@@ -1701,7 +1744,7 @@ public:
      */
     void writeVariantInfo(std::ostream& outStream) {
         m_header.filePosVariants = outStream.tellp();
-        for (size_t i = 0; i < m_header.numVariants; i++) {
+        for (VariantT i = 0; i < m_header.numVariants; i++) {
             const std::string& ref = m_referenceAlleles.at(i);
             writeScalar<uint64_t>(ref.size(), outStream);
             outStream.write(ref.c_str(), ref.size());
@@ -1722,40 +1765,54 @@ public:
      * @param[in] labels A list (vector) of string identifiers. One id per individual.
      */
     void writeIndividualIds(std::ostream& outStream, const std::vector<std::string>& labels) {
-        m_header.filePosIndividualIds = outStream.tellp();
-        PICOVCF_RELEASE_ASSERT(0 != m_header.filePosIndividualIds);
-        if (labels.size() != m_header.numIndividuals) {
-            PICOVCF_THROW_ERROR(ApiMisuse, "Must provide one label per individual");
-        }
+        if (labels.empty()) {
+            m_header.filePosIndividualIds = 0;
+        } else {
+            m_header.filePosIndividualIds = outStream.tellp();
+            PICOVCF_RELEASE_ASSERT(0 != m_header.filePosIndividualIds);
+            if (labels.size() != m_header.numIndividuals) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Must provide one label per individual");
+            }
 
-        writeScalar<uint64_t>(labels.size(), outStream);
-        for (const auto& label : labels) {
-            writeScalar<uint64_t>(label.size(), outStream);
-            outStream.write(label.c_str(), label.size());
-        }
-    }
-
-    /**
-     * Write the table of missing table. This information is collected and saved
-     * by writeSamplesRow(), so this function must be called _after_ that one.
-     * @param[in] outStream The output stream.
-     */
-    void writeMissingData(std::ostream& outStream) {
-        m_header.filePosMissingData = outStream.tellp();
-        writeScalar<uint64_t>(m_variantToMissingSamples.size(), outStream);
-        for (const auto& pair : m_variantToMissingSamples) {
-            writeScalar<uint64_t>(pair.first, outStream);
-            writeScalar<uint64_t>(pair.second.size(), outStream);
-            for (size_t i = 0; i < pair.second.size(); i++) {
-                writeScalar<uint64_t>(pair.second[i], outStream);
+            writeScalar<uint64_t>(labels.size(), outStream);
+            for (const auto& label : labels) {
+                writeScalar<uint64_t>(label.size(), outStream);
+                outStream.write(label.c_str(), label.size());
             }
         }
     }
+
+    size_t m_sparseCount{};
+    size_t m_totalCount{};
 private:
+    void writeSparse(std::ostream& outStream, const IGDSampleList& sampleList) {
+        writeScalar<SampleT>(sampleList.size(), outStream);
+        for (SampleT i = 0; i < sampleList.size(); i++) {
+            writeScalar<SampleT>(sampleList[i], outStream);
+        }
+    }
+
+    IGDData::IndexEntry makeEntry(VariantT genomePosition,
+                                  const bool isSparse,
+                                  const bool isMissing,
+                                  std::streamoff filePosition) {
+        uint64_t position = static_cast<uint64_t>(genomePosition);
+        if ((IGDData::BP_POS_FLAGS_MASK & position) != 0) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "Given genome position is too large: " << genomePosition);
+        }
+        if (isSparse) {
+            position |= IGDData::BP_POS_FLAGS_SPARSE;
+        }
+        if (isMissing) {
+            position |= IGDData::BP_POS_FLAGS_IS_MISSING;
+        }
+        return {position, static_cast<uint64_t>(filePosition)};
+    }
+
     IGDData::FixedHeader m_header;
     std::vector<std::string> m_referenceAlleles;
     std::vector<std::string> m_alternateAlleles;
-    std::unordered_map<IndexT, std::vector<IndexT>> m_variantToMissingSamples;
+    std::vector<IGDData::IndexEntry> m_index;
 };
 
 
@@ -1768,7 +1825,8 @@ private:
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
-                     std::string description = "") {
+                     std::string description = "",
+                     bool verbose = false) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1778,8 +1836,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
 
     IndividualIteratorGT firstIndividual = variant1.getIndividualIterator();
     PICOVCF_ASSERT_OR_MALFORMED(firstIndividual.hasNext(), "VCF file has no genotype data");
-    IndexT allele1 = 0;
-    IndexT allele2 = 0;
+    VariantT allele1 = 0;
+    VariantT allele2 = 0;
     const bool isPhased = firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
     const uint64_t ploidy = (allele2 == NOT_DIPLOID) ? 1 : 2;
 
@@ -1791,28 +1849,57 @@ inline void vcfToIGD(const std::string& vcfFilename,
         vcf.nextVariant();
         VCFVariantView& variant = vcf.currentVariant();
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
-        std::vector<IndexT> variantGtData;
+        auto altAlleles = variant.getAltAlleles();
+        IGDSampleList missingData;
+        std::vector<IGDSampleList> variantGtData(altAlleles.size());
+        SampleT sampleIndex = 0;
         while (individualIt.hasNext()) {
             const bool isPhasedI = individualIt.getAlleles(allele1, allele2);
             PICOVCF_ASSERT_OR_MALFORMED(isPhasedI == isPhased, "Cannot convert VCF with mixed phasedness");
             const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
             PICOVCF_ASSERT_OR_MALFORMED(ploidyI == ploidy, "Cannot convert VCF with mixed ploidy");
-            variantGtData.push_back(allele1);
+            if (allele1 == MISSING_VALUE) {
+                missingData.push_back(sampleIndex);
+            } else if (allele1 > 0) {
+                variantGtData.at(allele1-1).push_back(sampleIndex);
+            }
+            sampleIndex++;
             if (ploidy == 2) {
-                variantGtData.push_back(allele2);
+                if (allele2 == MISSING_VALUE) {
+                    missingData.push_back(sampleIndex);
+                } else if (allele2 > 0) {
+                    variantGtData.at(allele2-1).push_back(sampleIndex);
+                }
+                sampleIndex++;
             }
         }
-        writer.writeSamplesRow(outFile,
-                               variant.getPosition(),
-                               variant.getRefAllele(),
-                               variant.getAltAlleles(),
-                               variantGtData);
+        for (size_t altIndex = 0; altIndex < altAlleles.size(); altIndex++) {
+            writer.writeVariantSamples(outFile,
+                                    variant.getPosition(),
+                                    variant.getRefAllele(),
+                                    altAlleles[altIndex],
+                                    variantGtData[altIndex],
+                                    false);
+        }
+        if (!missingData.empty()) {
+            writer.writeVariantSamples(outFile,
+                                       variant.getPosition(),
+                                       variant.getRefAllele(),
+                                       "",
+                                       missingData,
+                                       true);
+        }
     }
+    writer.writeIndex(outFile);
     writer.writeVariantInfo(outFile);
-    writer.writeMissingData(outFile);
     writer.writeIndividualIds(outFile, vcf.getIndividualLabels());
     outFile.seekp(0);
     writer.writeHeader(outFile, vcfFilename, description);
+
+    if (verbose) {
+        std::cout << "Wrote " << writer.m_totalCount << " total variants" << std::endl;
+        std::cout << "Of which " << writer.m_sparseCount << " were written sparsely" << std::endl;
+    }
 }
 
 }

@@ -43,16 +43,13 @@ DOC_BUILD_DIR=$PWD sphinx-build -c ../doc/ -b html -Dbreathe_projects.picovcf=$P
 `picovcf` also defines an extremely simple binary file format that can be used for fast access to genotype data. Most other genotype data formats are not indexable directly: that is, you cannot jump directly to the 1 millionth variant without first scanning all the previous (almost million) variants. IGD has the following properties:
 * Indexable. You can use math to figure out where the `i`th variant will be in the file.
 * Uncompressed. No need to link in compression libraries.
-* Simple format: all variants are expanded into binary variants. So if a Variant has `N` alternate alleles, then IGD will store that as `N` rows containing `0` (reference allele) or `1` (alternate allele).
-* Reasonably small. It is slightly larger than more complex file formats (like BGEN), but usually within a factor of `3`-`4` in filesize.
+* Simple format: all variants are expanded into binary variants. So if a Variant has `N` alternate alleles, then IGD will store that as `N` rows containing `0` (reference allele) or `1` (alternate allele). Each of these binary variants is stored as either a bitvector (non-sparse) or a list of sample indexes (sparse). A flag in the index indicates which way each variant is stored.
+* Very small. Oftentimes smaller than compressed formats like `.vcf.gz` or `.bgen`. The more low-frequency mutations (such as for really large sample sizes) the smaller the file, assuming you are using the default implementation of dynamically choosing between sparse/non-sparse representation.
 
 For example, the following are from chromosome 22 of a real dataset:
 * `.vcf`: 11GB
 * `.vcf.gz`: 203MB
 * `.bgen`: 256MB
-* `.igd`: 691MB
+* `.igd`: 183MB
 
-Converting the `.vcf.gz` to `.bgen` (via qctool) took 23 minutes, but converting to `.igd` only took 3 minutes. Furthermore, iteratively accessing all the variants (and genotype data) in the `.igd` file was ~`5x` faster than accessing the same data in the `.vcf.gz` file.
-
-All that to say: `.igd` is a good format if you want fast access to variants in a relatively small file.
-
+Converting the `.vcf.gz` to `.bgen` (via qctool) took 23 minutes, but converting to `.igd` only took 3 minutes. Furthermore, iteratively accessing all the variants (and genotype data) in the `.igd` file was approximately `15x` faster than accessing the same data in the `.vcf.gz` file (using `picovcf`). On Biobank-scale real datasets, IGD is on average 3.5x smaller than `.vcf.gz`.

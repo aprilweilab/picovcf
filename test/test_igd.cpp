@@ -14,8 +14,16 @@ TEST(IGD, MissingData) {
 
     IGDData igdFile(igdFileName);
 
-    ASSERT_EQ(igdFile.numVariants(), 7); // 2 of the variants have multiple alt alleles
-    const auto& missingData = igdFile.getMissingData();
+    ASSERT_EQ(igdFile.numVariants(), 12); // 2 of the variants have multiple alt alleles
+    size_t numMissing = 0;
+    for (size_t i = 0; i < igdFile.numVariants(); i++) {
+        bool isMissing = false;
+        igdFile.getPosition(i, isMissing);
+        auto sampleList = igdFile.getSamplesWithAlt(i);
+        if (isMissing) {
+            numMissing++;
+        }
+    }
     // Every variant is missing
-    ASSERT_EQ(missingData.size(), 5);
+    ASSERT_EQ(numMissing, 5);
 }

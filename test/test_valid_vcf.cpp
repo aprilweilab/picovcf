@@ -29,8 +29,8 @@ TEST(ValidVCF, SpecExample) {
         VCFVariantView variant = vcf.currentVariant();
         IndividualIteratorGT iterator = variant.getIndividualIterator();
         while (iterator.hasNext()) {
-            IndexT allele1 = 0;
-            IndexT allele2 = 0;
+            VariantT allele1 = 0;
+            VariantT allele2 = 0;
             iterator.getAlleles(allele1, allele2);
         }
     }
@@ -48,8 +48,8 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_TRUE(variant1.hasGenotypeData());
 
     // Check all individuals of the first variant
-    size_t allele1 = MISSING_VALUE;
-    size_t allele2 = MISSING_VALUE;
+    VariantT allele1 = MISSING_VALUE;
+    VariantT allele2 = MISSING_VALUE;
     bool isPhased;
     IndividualIteratorGT iterator = variant1.getIndividualIterator();
     // Do the first individual twice in a row.
@@ -93,9 +93,7 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_TRUE(variant4.hasGenotypeData());
 }
 
-using SampleList = std::vector<IndexT>;
-
-static bool hasSample(const SampleList& samples, IndexT id) {
+static bool hasSample(const IGDSampleList& samples, SampleT id) {
     for (auto sampleId : samples) {
         if (id == sampleId) {
             return true;
@@ -120,7 +118,8 @@ TEST(ValidVCF, Indexable) {
     ASSERT_EQ(indexableData.numVariants(), EXPECT_VARIANTS);
     ASSERT_EQ(indexableData.numIndividuals(), EXPECT_INDIVIDUALS);
     ASSERT_EQ(indexableData.numSamples(), 2*EXPECT_INDIVIDUALS);
-    ASSERT_EQ(indexableData.getPosition(0), 55829);
+    bool _ignore = false;
+    ASSERT_EQ(indexableData.getPosition(0, _ignore), 55829);
 
     size_t index = 0;
     vcf.seekBeforeVariants();
@@ -128,15 +127,20 @@ TEST(ValidVCF, Indexable) {
         vcf.nextVariant();
         VCFVariantView& variant = vcf.currentVariant();
         ASSERT_FALSE(variant.getAltAlleles().size() > 1);
-        ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index));
+        bool isMissing = false;
+        ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index, isMissing));
         auto sampleSet = indexableData.getSamplesWithAlt(index);
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
-        size_t sampleIndex = 0;
+        SampleT sampleIndex = 0;
         while (individualIt.hasNext()) {
-            IndexT allele1 = 255;
-            IndexT allele2 = 255;
+            VariantT allele1 = 255;
+            VariantT allele2 = 255;
             individualIt.getAlleles(allele1, allele2);
             if (allele1 == 1) {
+                if (!hasSample(sampleSet, sampleIndex)) {
+                    std::cout << "Variant " << index << " failed: ";
+                    std::cout << "missing sample " << sampleIndex << "\n";
+                }
                 ASSERT_TRUE(hasSample(sampleSet, sampleIndex));
             }
             sampleIndex++;
