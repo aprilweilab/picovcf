@@ -1042,7 +1042,7 @@ public:
         }
         auto prevFilePosition = this->getFilePosition();
         const size_t numIndividuals =
-            std::min(totalIndividuals, individualRange.second) - individualRange.first;
+            std::min<size_t>(totalIndividuals, individualRange.second) - individualRange.first;
         result.firstIndividual = individualRange.first;
         result.sampleToMutation.clear();
         result.parsedVariants.clear();
@@ -1060,7 +1060,7 @@ public:
 
                 for (size_t i = 0; i < (individualRange.second - individualRange.first)
                                    && iterator.hasNext(); i++, iterator.next()) {
-                    size_t allele1 = 0, allele2 = 0;
+                    VariantT allele1 = 0, allele2 = 0;
                     iterator.getAlleles(allele1, allele2, /*moveNext=*/false);
                     if (result.sampleToMutation.empty()) {
                         result.isDiploid = (allele2 != NOT_DIPLOID);

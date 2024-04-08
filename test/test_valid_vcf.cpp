@@ -48,8 +48,8 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_TRUE(variant1.hasGenotypeData());
 
     // Check all individuals of the first variant
-    size_t allele1 = MISSING_VALUE;
-    size_t allele2 = MISSING_VALUE;
+    VariantT allele1 = MISSING_VALUE;
+    VariantT allele2 = MISSING_VALUE;
     bool isPhased;
     IndividualIteratorGT iterator = variant1.getIndividualIterator();
     // Do the first individual twice in a row.
