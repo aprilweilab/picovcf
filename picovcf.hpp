@@ -1277,19 +1277,19 @@ public:
         store it sparsely. */
     static constexpr uint32_t DEFAULT_SPARSE_THRESHOLD = 128;
 
-    /* File format.
+    /* See IGD.FORMAT.md for detailed file format. The layout is:
      * - FixedHeader (128 bytes)
      * - Source (string: 8 byte length, followed by that many bytes)
      * - Description (string: 8 byte length, followed by that many bytes)
-     * - Genotype data rows, one per variant:
-     *    - Position (8 byte unsigned integer)
-     *    - (ploidy * numIndividuals) bits, where 0 means reference and 1 mean alternate
-     * - Variant info, one per variant:
-     *    - Reference allele (string: 8 byte length, followed by that many bytes)
-     *    - Alternate allele (string: 8 byte length, followed by that many bytes)
-     * - Optional individual identifiers (labels):
-     *    - 8 byte length, indicates how many labels there are
-     *    - Each label is a string (8 byte length, followed by that many bytes)
+     * - Genotype data rows, >=1 per variant.
+     *    - multi-allelic variants are expanded into multiple rows
+     *    - missing data is expanded into its own row
+     *    - each row may be either sparse (list of sample indices) or dense (bit vector)
+     * - At arbitrary locations in the file, as defined by the header:
+     *    - An index of all the variants, with the genomic and file position, and flags that
+     *      indicate whether it is stored sparsely or not.
+     *    - A list of the variant information, which contains the allele strings themselves.
+     *    - A list of identifiers for the individuals (samples) in the dataset (optional).
      *
      * There can be many variants for each position. Each variant is a single alternative.
      * So conversion from VCF would take a single variant with N alternate alleles and create
@@ -1406,9 +1406,6 @@ public:
         VariantT lastPosition = this->getPosition(this->numVariants() - 1, _ignore);
         return {firstPosition, lastPosition};
     }
-
-    // TODO: would be nice to read position and "is missing" together, so clients can skip
-    // missing data if desired.
 
     /**
      * Get the position of the given variant.
