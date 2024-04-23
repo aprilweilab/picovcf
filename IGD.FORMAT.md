@@ -70,4 +70,4 @@ At position identified by `filePosIndex` is the file index. There are `numVarian
 | ---- | ---- | ---- | ---- |
 | 0 | 1 | flags | Flags describing properties of this variant. Can be 0 (nothing) or a bitwise combination of: `SPARSE=0x1`, `IS_MISSING=0x2` |
 | 1 | 7 | bpPosition | The position on the genome in base pairs for this variant. |
-| 8 | 16 | filePosDataRow | The file position for the sample row. This can be sparse (see `SizedList`) or a bit vector (see `BitVector`), depending on if flag `SPARSE` is set. If `IS_MISSING` flag is set, this represents missing data from this variant. |
+| 8 | 8 | filePosDataRow | The file position for the sample row. This can be sparse (see `SizedList`) or a bit vector (see `BitVector`), depending on if flag `SPARSE` is set. If `IS_MISSING` flag is set, this represents missing data from this variant. |
