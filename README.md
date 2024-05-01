@@ -7,6 +7,13 @@ Single-header C++ library for fast/low-memory VCF (Variant Call Format) parsing.
 
 There are a lot of great tools for processing VCF files out there, but not many C++ libraries that are small (only parsing, no extra functionality) and easy to use. `picovcf` attempts to fill this niche by providing a header-only library using modern C++ (C++11) that allows clients to be selective about which parts of the VCF file get parsed.
 
+Features:
+* Fast and easy to use VCF(.GZ) parsing.
+* Convert VCF(.GZ) to Indexable Genotype Data (IGD) format, which is a very simple format that is **more than 3x smaller than VCF.GZ at Biobank scale** and **more than 15x faster to read**
+* Fast and easy to use IGD parsing.
+
+More details can be found in the supplement of our [preprint "Genotype Representation Graph" paper](https://www.biorxiv.org/content/10.1101/2024.04.23.590800v1).
+
 ## Using the library
 
 Either copy the latest header file (`picovcf.hpp`) into your project directly, or make use of something like git submodules to include https://github.com/aprilweilab/picovcf.
