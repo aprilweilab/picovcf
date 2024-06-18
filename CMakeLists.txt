@@ -8,7 +8,7 @@ option(FUZZING_SUPPORT "Build for fuzzing; only abort on true failures, not inva
 option(BUILD_EXAMPLES "Build example tools" ON)
 
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE "Debug")
+  set(CMAKE_BUILD_TYPE "Release")
 endif()
 
 # Check for optional POSIX functions
