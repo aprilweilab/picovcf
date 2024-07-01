@@ -73,6 +73,9 @@ if(${BUILD_EXAMPLES})
   # igdpp utility
   add_executable(igdpp examples/igdpp.cpp)
   target_link_libraries(igdpp ${LIBRARIES_TO_LINK})
+  # igdcp utility
+  add_executable(igdcp examples/igdcp.cpp)
+  target_link_libraries(igdcp ${LIBRARIES_TO_LINK})
   if (${ENABLE_VCF_GZ})
     # gzcat utility
     add_executable(gzcat examples/gzcat.cpp)

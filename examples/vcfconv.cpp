@@ -1,7 +1,7 @@
 /* Convert VCF to IIGT.
  *
  * Usage:
- *  vcfconv <vcf-file> <output-file>
+ *  vcfconv <vcf-file> <output-file> -copy-ids
  */
 #include <iostream>
 
@@ -11,12 +11,22 @@ using namespace picovcf;
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        std::cerr << "Please pass in an input file and output file name" << std::endl;
+        std::cerr << "Usage: vcfconv <vcf-file> <output-file> [-copy-ids]" << std::endl;
         return 1;
     }
 
+    bool emitIndividualIds = false;
     const std::string infile(argv[1]);
     const std::string outfile(argv[2]);
-    vcfToIGD(infile, outfile, "", true);
+    if (argc > 3) {
+        std::string arg3 = argv[3];
+        if (arg3 == "-copy-ids") {
+            emitIndividualIds = true;
+        } else {
+            std::cerr << "Unrecognized flag \"" << arg3 << "\"" << std::endl;
+            return 1;
+        }
+    }
+    vcfToIGD(infile, outfile, "", true, emitIndividualIds);
     return 0;
 }
