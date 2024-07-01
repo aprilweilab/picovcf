@@ -1179,12 +1179,15 @@ static inline T readScalar(std::istream& inStream) {
     return simpleValue;
 }
 
-static inline size_t readStringLen(std::istream& inStream) {
-    return readScalar<uint64_t>(inStream);
+static inline size_t readStringLen(const uint64_t version, std::istream& inStream) {
+    if (version == 3) {
+        return readScalar<uint64_t>(inStream);
+    }
+    return readScalar<uint32_t>(inStream);
 }
 
-static inline std::string readString(std::istream& inStream) {
-    const auto strLength = readStringLen(inStream);
+static inline std::string readString(const uint64_t version, std::istream& inStream) {
+    const auto strLength = readStringLen(version, inStream);
     PICOVCF_GOOD_OR_MALFORMED_FILE(inStream);
     std::string strValue;
     strValue.resize(strLength);
@@ -1285,7 +1288,7 @@ public:
     /** Flag that indicates the genotype data is phased */
     static constexpr uint64_t IGD_PHASED = 0x1;
     /** The IGD file format version that this library writes */
-    static constexpr uint64_t CURRENT_IGD_VERSION = 3;
+    static constexpr uint64_t CURRENT_IGD_VERSION = 4;
     /** If fewer than NumSamples/DEFAULT_SPARSE_THRESHOLD samples have a particular variant, we will
         store it sparsely. */
     static constexpr uint32_t DEFAULT_SPARSE_THRESHOLD = 32;
@@ -1320,7 +1323,8 @@ public:
         uint64_t filePosIndex;          // Byte offset in the file where the variant rows start.
         uint64_t filePosVariants;       // Byte offset in the file where the variant allele information start.
         uint64_t filePosIndividualIds;  // Byte offset in the file where the identifiers for individuals start.
-        uint64_t unused[7];
+        uint64_t filePosVariantIds;  // Byte offset in the file where the identifiers for variants start.
+        uint64_t unused[6];
     };
     static_assert(sizeof(FixedHeader) == 128, "Header size is fixed");
 
@@ -1537,11 +1541,31 @@ public:
             const size_t numLabels = readScalar<uint64_t>(m_infile);
             PICOVCF_ASSERT_OR_MALFORMED(numLabels == m_header.numIndividuals, "Invalid number of individual ids");
             for (size_t i = 0; i < numLabels; i++) {
-                result.emplace_back(std::move(readString(m_infile)));
+                result.emplace_back(std::move(readString(m_header.version, m_infile)));
             }
         }
         return std::move(result);
     }
+
+    /**
+     * Read the (optional) list of variant identifiers from the file.
+     *
+     * @return A newly created std::vector<std::string> object. Variant 0 has its label at
+     *      position 0, and the last variant has its identifier at position (numVariants()-1).
+     */
+    std::vector<std::string> getVariantIds() {
+        std::vector<std::string> result;
+        if (0 != m_header.filePosVariantIds) {
+            m_infile.seekg(m_header.filePosVariantIds);
+            const size_t numLabels = readScalar<uint64_t>(m_infile);
+            PICOVCF_ASSERT_OR_MALFORMED(numLabels == m_header.numVariants, "Invalid number of variant ids");
+            for (size_t i = 0; i < numLabels; i++) {
+                result.emplace_back(std::move(readString(m_header.version, m_infile)));
+            }
+        }
+        return std::move(result);
+    }
+
 private:
     size_t getVariantIndexOffset(VariantT variantIndex) {
         return m_header.filePosIndex + (variantIndex * sizeof(IndexEntry));
@@ -1552,10 +1576,12 @@ private:
         PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
         PICOVCF_ASSERT_OR_MALFORMED(m_header.magic == IGD_MAGIC,
                                    "Invalid magic " << std::hex << m_header.magic);
-        PICOVCF_ASSERT_OR_MALFORMED(m_header.version == CURRENT_IGD_VERSION,
+        static_assert(CURRENT_IGD_VERSION == 4, "Remove/check backwards compatibility if incrementing version");
+        PICOVCF_ASSERT_OR_MALFORMED(m_header.version == CURRENT_IGD_VERSION
+                                    || m_header.version == 3,
                                    "Unsupported file format version " << m_header.version);
-        m_source = readString(m_infile);
-        m_description = readString(m_infile);
+        m_source = readString(m_header.version, m_infile);
+        m_description = readString(m_header.version, m_infile);
         m_beforeFirstVariant = m_infile.tellg();
         PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants > m_beforeFirstVariant,
                                    "Invalid variant info position " << m_header.filePosVariants);
@@ -1574,7 +1600,7 @@ private:
         m_referenceAlleles.reserve(m_header.numVariants);
         m_alternateAlleles.reserve(m_header.numVariants);
         for (VariantT i = 0; i < m_header.numVariants; i++) {
-            std::string reference = readString(m_infile);
+            std::string reference = readString(m_header.version, m_infile);
             PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
             IGDAllele refAllele(reference, m_longAlleles.size());
             if (refAllele.isLong()) {
@@ -1582,7 +1608,7 @@ private:
             }
             m_referenceAlleles.push_back(std::move(refAllele));
 
-            std::string alternate = readString(m_infile);
+            std::string alternate = readString(m_header.version, m_infile);
             PICOVCF_GOOD_OR_MALFORMED_FILE(m_infile);
             IGDAllele altAllele(alternate, m_longAlleles.size());
             if (altAllele.isLong()) {
@@ -1613,7 +1639,7 @@ static inline void writeScalar(T intValue, std::ostream& outStream) {
 }
 
 static inline void writeString(const std::string& value, std::ostream& outStream) {
-    writeScalar<uint64_t>(value.size(), outStream);
+    writeScalar<uint32_t>(value.size(), outStream);
     outStream.write(value.c_str(), value.size());
 }
 
@@ -1788,6 +1814,33 @@ public:
         }
     }
 
+    /**
+     * Write the table of variant identifiers.
+     *
+     * This is an optional part of the IGD file. You can create an IGD and not call this method, in
+     * which case the variant ID table will just be empty.
+     *
+     * @param[in] outStream The output stream.
+     * @param[in] labels A list (vector) of string identifiers. One id per variant.
+     */
+    void writeVariantIds(std::ostream& outStream, const std::vector<std::string>& labels) {
+        if (labels.empty()) {
+            m_header.filePosVariantIds = 0;
+        } else {
+            m_header.filePosVariantIds = outStream.tellp();
+            PICOVCF_RELEASE_ASSERT(0 != m_header.filePosVariantIds);
+            if (labels.size() != m_header.numVariants) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Must provide one label per individual");
+            }
+
+            writeScalar<uint64_t>(labels.size(), outStream);
+            for (const auto& label : labels) {
+                writeString(label, outStream);
+            }
+        }
+    }
+
+
     size_t m_sparseCount{};
     size_t m_totalCount{};
 private:
@@ -1830,12 +1883,14 @@ private:
  * @param[in] description [Optional] A description of the dataset.
  * @param[in] verbose [Optional] Set to true to get statistics printed to stdout.
  * @param[in] emitIndividualIds [Optional] Copy individual IDs to IGD file (false by default).
+ * @param[in] emitVariantIds [Optional] Copy variant IDs to IGD file (false by default).
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
                      std::string description = "",
                      bool verbose = false,
-                     bool emitIndividualIds = false) {
+                     bool emitIndividualIds = false,
+                     bool emitVariantIds = false) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1850,6 +1905,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
     const bool isPhased = firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
     const uint64_t ploidy = (allele2 == NOT_DIPLOID) ? 1 : 2;
 
+    std::vector<std::string> variantIds;
     std::ofstream outFile(outFilename, std::ios::binary);
     IGDWriter writer(ploidy, vcf.numIndividuals(), isPhased);
     writer.writeHeader(outFile, vcfFilename, description);
@@ -1882,6 +1938,10 @@ inline void vcfToIGD(const std::string& vcfFilename,
                 sampleIndex++;
             }
         }
+        std::string currentVariantId;
+        if (emitVariantIds) {
+            currentVariantId = variant.getID();
+        }
         for (size_t altIndex = 0; altIndex < altAlleles.size(); altIndex++) {
             writer.writeVariantSamples(outFile,
                                        variant.getPosition(),
@@ -1889,6 +1949,9 @@ inline void vcfToIGD(const std::string& vcfFilename,
                                        altAlleles[altIndex],
                                        variantGtData[altIndex],
                                        false);
+            if (emitVariantIds) {
+                variantIds.emplace_back(currentVariantId);
+            }
         }
         if (!missingData.empty()) {
             writer.writeVariantSamples(outFile,
@@ -1897,12 +1960,18 @@ inline void vcfToIGD(const std::string& vcfFilename,
                                        "",
                                        missingData,
                                        true);
+            if (emitVariantIds) {
+                variantIds.emplace_back(currentVariantId);
+            }
         }
     }
     writer.writeIndex(outFile);
     writer.writeVariantInfo(outFile);
     if (emitIndividualIds) {
         writer.writeIndividualIds(outFile, vcf.getIndividualLabels());
+    }
+    if (emitVariantIds) {
+        writer.writeVariantIds(outFile, variantIds);
     }
     outFile.seekp(0);
     writer.writeHeader(outFile, vcfFilename, description);
