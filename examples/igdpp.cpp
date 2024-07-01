@@ -4,7 +4,7 @@
  * Usage:
  *  igdpp <command> <file>
  *
- * where command is one of ["stats", "range_start"]
+ * where command is one of ["freq", "individuals", "stats", "sites", "range_start"]
  */
 #include <iostream>
 #include <cmath>
@@ -44,6 +44,23 @@ int main(int argc, char *argv[]) {
         std::cout << "  Genome range: " << igd.getPosition(0)
                                         << "-" << igd.getPosition(igd.numVariants()-1) << std::endl;
         std::cout << "  Has individual IDs? " << (igd.getIndividualIds().empty() ? "No" : "Yes") << std::endl;
+    } else if (command == "sites") {
+        size_t lastPosition = std::numeric_limits<size_t>::max();
+        size_t sites = 0;
+        for (size_t i = 0; i < igd.numVariants(); i++) {
+            bool isMissing = false;
+            auto pos = igd.getPosition(i, isMissing);
+            if (pos != lastPosition) {
+                sites++;
+                lastPosition = pos;
+            }
+        }
+        std::cout << "Unique sites: " << sites << std::endl;
+    } else if (command == "individuals") {
+        std::vector<std::string> individualIds = igd.getIndividualIds();
+        for (size_t i = 0; i < individualIds.size(); i++) {
+            std::cout << i << ": " << individualIds[i] << std::endl;
+        }
     } else if (command == "range_stats") {
         std::cout << "Stats for " << filename << std::endl;
         bool _ignore = false;
