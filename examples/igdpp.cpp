@@ -4,7 +4,7 @@
  * Usage:
  *  igdpp <command> <file>
  *
- * where command is one of ["freq", "individuals", "stats", "sites", "range_start"]
+ * where command is one of ["freq", "individuals", "stats", "sites", "range_start", "variants"]
  */
 #include <iostream>
 #include <cmath>
@@ -60,6 +60,11 @@ int main(int argc, char *argv[]) {
         std::vector<std::string> individualIds = igd.getIndividualIds();
         for (size_t i = 0; i < individualIds.size(); i++) {
             std::cout << i << ": " << individualIds[i] << std::endl;
+        }
+    } else if (command == "variants") {
+        std::vector<std::string> variantIds = igd.getVariantIds();
+        for (size_t i = 0; i < variantIds.size(); i++) {
+            std::cout << i << ": " << variantIds[i] << std::endl;
         }
     } else if (command == "range_stats") {
         std::cout << "Stats for " << filename << std::endl;

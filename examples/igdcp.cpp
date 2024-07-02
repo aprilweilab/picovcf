@@ -44,6 +44,7 @@ int main(int argc, char *argv[]) {
     writer.writeIndex(igdOutfile);
     writer.writeVariantInfo(igdOutfile);
     writer.writeIndividualIds(igdOutfile, igd.getIndividualIds());
+    writer.writeVariantIds(igdOutfile, igd.getVariantIds());
     igdOutfile.seekp(0);
     writer.writeHeader(igdOutfile, infile, igd.getDescription());
 
