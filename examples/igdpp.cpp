@@ -4,7 +4,7 @@
  * Usage:
  *  igdpp <command> <file>
  *
- * where command is one of ["freq", "individuals", "stats", "sites", "range_start", "variants"]
+ * where command is one of ["stats", "range_stats"]
  */
 #include <iostream>
 #include <cmath>
@@ -13,14 +13,6 @@
 #include "picovcf.hpp"
 
 using namespace picovcf;
-
-inline void emitAllele(VariantT alleleIndex, std::ostream& out) {
-    if (alleleIndex == MISSING_VALUE) {
-        out << "? ";
-    } else {
-        out << alleleIndex << " ";
-    }
-}
 
 int main(int argc, char *argv[]) {
     std::cout << std::fixed << std::setprecision(4);
@@ -44,28 +36,6 @@ int main(int argc, char *argv[]) {
         std::cout << "  Genome range: " << igd.getPosition(0)
                                         << "-" << igd.getPosition(igd.numVariants()-1) << std::endl;
         std::cout << "  Has individual IDs? " << (igd.getIndividualIds().empty() ? "No" : "Yes") << std::endl;
-    } else if (command == "sites") {
-        size_t lastPosition = std::numeric_limits<size_t>::max();
-        size_t sites = 0;
-        for (size_t i = 0; i < igd.numVariants(); i++) {
-            bool isMissing = false;
-            auto pos = igd.getPosition(i, isMissing);
-            if (pos != lastPosition) {
-                sites++;
-                lastPosition = pos;
-            }
-        }
-        std::cout << "Unique sites: " << sites << std::endl;
-    } else if (command == "individuals") {
-        std::vector<std::string> individualIds = igd.getIndividualIds();
-        for (size_t i = 0; i < individualIds.size(); i++) {
-            std::cout << i << ": " << individualIds[i] << std::endl;
-        }
-    } else if (command == "variants") {
-        std::vector<std::string> variantIds = igd.getVariantIds();
-        for (size_t i = 0; i < variantIds.size(); i++) {
-            std::cout << i << ": " << variantIds[i] << std::endl;
-        }
     } else if (command == "range_stats") {
         std::cout << "Stats for " << filename << std::endl;
         bool _ignore = false;
@@ -128,18 +98,6 @@ int main(int argc, char *argv[]) {
     
         std::cout << "  Variants with missing data: " << missingRows << std::endl;
         std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
-
-
-    } else if (command == "freq") {
-        static constexpr char SEP = '\t';
-        std::cout << "POSITION" << SEP << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP << "TOTAL" << std::endl;
-        for (size_t i = 0; i < igd.numVariants(); i++) {
-            bool isMissing = false;
-            auto pos = igd.getPosition(i, isMissing);
-            auto sampleList = igd.getSamplesWithAlt(i);
-            std::cout << pos << SEP << igd.getRefAllele(i) << SEP
-                << igd.getAltAllele(i) << SEP << sampleList.size() << SEP << igd.numSamples() << std::endl;
-        }
-    }
+    } 
     return 0;
 }

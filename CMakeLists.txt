@@ -5,7 +5,8 @@ project(picovcf)
 
 option(ENABLE_VCF_GZ "Enable support for .vcf.gz (via ZLIB)" OFF)
 option(FUZZING_SUPPORT "Build for fuzzing; only abort on true failures, not invalid input data" OFF)
-option(BUILD_EXAMPLES "Build example tools" ON)
+option(BUILD_EXAMPLES "Build example tools" OFF)
+option(BUILD_IGDTOOLS "Build igdtools (for converting and processing IGD files)" ON)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
@@ -67,18 +68,17 @@ if(${BUILD_EXAMPLES})
   # vcfpp utility
   add_executable(vcfpp examples/vcfpp.cpp)
   target_link_libraries(vcfpp ${LIBRARIES_TO_LINK})
-  # vcfconv utility
-  add_executable(vcfconv examples/vcfconv.cpp)
-  target_link_libraries(vcfconv ${LIBRARIES_TO_LINK})
   # igdpp utility
   add_executable(igdpp examples/igdpp.cpp)
   target_link_libraries(igdpp ${LIBRARIES_TO_LINK})
-  # igdcp utility
-  add_executable(igdcp examples/igdcp.cpp)
-  target_link_libraries(igdcp ${LIBRARIES_TO_LINK})
   if (${ENABLE_VCF_GZ})
     # gzcat utility
     add_executable(gzcat examples/gzcat.cpp)
     target_link_libraries(gzcat ${LIBRARIES_TO_LINK})
   endif()
+endif()
+
+if(${BUILD_IGDTOOLS})
+  add_executable(igdtools igdtools/igdtools.cpp)
+  target_link_libraries(igdtools ${LIBRARIES_TO_LINK})
 endif()
