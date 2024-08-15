@@ -37,10 +37,16 @@ make
 
 To convert from a `.vcf` or `.vcf.gz` file to `.igd`, run:
 ```
-./vcfconv <vcf filename> <output IGD filename>
+./igdtools <vcf filename> -o <output IGD filename>
 ```
 
-To view basic statistics for an IGD file, use `igdpp`. Some commands to try are `./igdpp stats <igd file>` or `./igdpp range_stats <igd file>`.
+Run `./igdtools --help` to see the full list of options. Here are some common tasks you might want to perform, besides VCF conversion:
+* Pipe allele frequencies to a file: `./igdtools <input IGD> -a > allele.freq.tsv`
+* View variant/sample statistics and header info: `./igdtools <input IGD> --stats --info`
+* To, e.g., restrict to variants in base-pair range 10000,20000 add argument `--range 10000-20000`
+* To restrict to variants with frequencies >=0.01: `--frange 0.01-1.0`
+* Copy from one IGD to another: `./igdtools <input IGD> -o <output IGD>`
+  * Only include variants in a certain range and with frequency: `./igdtools <input IGD> -o <output IGD> --range 100000-500000 --frange 0.01-0.5`
 
 Finally, to run the unit tests:
 ```
@@ -78,7 +84,7 @@ Converting the `.vcf.gz` to `.bgen` (via qctool) took 23 minutes, but converting
 
 * Clone [picovcf](https://github.com/aprilweilab/picovcf) and follow the instructions in this README to build the example tools for that library.
   * If you want to be able to convert `.vcf.gz` (compressed VCF) to IGD, make sure you build with `-DENABLE_VCF_GZ=ON`
-* One of the built tools will be `vcfconf`, which converts from VCF to IGD. Run `vcfconv <vcf file> <igd file>` to convert your data to IGD.
+* Use `igdtools` to convert and process files
 * Do one of the following:
   * If your project is C++, copy [picovcf.hpp](https://github.com/aprilweilab/picovcf/blob/main/picovcf.hpp) into your project, `#include` it somewhere and then use according to the [documentation](https://picovcf.readthedocs.io/en/latest/)
   * If your project is Python, clone [pyigd](https://github.com/aprilweilab/pyigd/) and install it per the [README instructions](https://github.com/aprilweilab/pyigd/blob/main/README.md).
