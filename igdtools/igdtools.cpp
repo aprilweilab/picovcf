@@ -43,8 +43,6 @@ inline std::vector<std::string> split(const std::string &s, char delim) {
 }
 
 int main(int argc, char *argv[]) {
-    std::cout << std::fixed << std::setprecision(4);
-
     args::ArgumentParser parser("Process or create IGD files.");
     args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
     args::Positional<std::string> infile(parser, "input_file", "The input file (.vcf, .vcf.gz, or .igd)");
@@ -72,6 +70,8 @@ int main(int argc, char *argv[]) {
     args::Flag noVariantIds(
         parser, "noVariantIds", "Do not emit IDs for variants in the resulting IGD file.", {"no-var-ids"}
     );
+    args::ValueFlag<size_t> trimSamples(
+        parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -158,7 +158,17 @@ int main(int argc, char *argv[]) {
 
     }
 
+    const uint64_t ploidy = igd.getPloidy();
     const size_t numSamples = igd.numSamples();
+    size_t effectiveSampleCt = numSamples;
+    if (trimSamples) {
+        effectiveSampleCt = ploidy * (*trimSamples);
+        if (effectiveSampleCt > numSamples) {
+            std::cerr << "--trim value is larger than the number of individuals" << std::endl;
+            return 2;
+        }
+        std::cout << "Trimming to " << effectiveSampleCt << " haploid samples" << std::endl;
+    }
 
     if (info) {
         std::cout << "Header information for " << *infile << std::endl;
@@ -199,12 +209,10 @@ int main(int argc, char *argv[]) {
 
     std::shared_ptr<std::ofstream> igdOutfile;
     std::shared_ptr<IGDWriter> writer;
+    const uint64_t numIndividuals = effectiveSampleCt / ploidy;
     if (outfile) {
-        uint64_t numIndividuals = igd.numIndividuals();
-        uint64_t ploidy = igd.getPloidy();
-
         igdOutfile = std::make_shared<std::ofstream>(*outfile, std::ios::binary);
-        writer = std::make_shared<IGDWriter>(ploidy, igd.numIndividuals(), igd.isPhased());
+        writer = std::make_shared<IGDWriter>(ploidy, numIndividuals, igd.isPhased());
         writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
     }
 
@@ -220,7 +228,7 @@ int main(int argc, char *argv[]) {
         size_t missingAlleles = 0;
         std::vector<size_t> samplesPerVariant;
         size_t sampleRefsTotal = 0;
-        std::vector<size_t> sampleToMuts(igd.numSamples()); // Counts muts per sample
+        std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
         
         size_t lastPosition = std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < igd.numVariants(); i++) {
@@ -228,14 +236,24 @@ int main(int argc, char *argv[]) {
             auto pos = igd.getPosition(i, isMissing);
             if (pos >= bpStart && pos <= bpEnd) {
                 auto sampleList = igd.getSamplesWithAlt(i);
+                if (trimSamples) {
+                    size_t j = 0;
+                    while (j < sampleList.size() && sampleList[j] < effectiveSampleCt) {
+                        j++;
+                    }
+                    if (j != sampleList.size()) {
+                        sampleList.resize(j);
+                    }
+                }
+                assert(sampleCt <= effectiveSampleCt);
                 const auto sampleCt = sampleList.size();
-                const double freq = (double)sampleCt/(double)numSamples;
+                const double freq = (double)sampleCt/(double)effectiveSampleCt;
                 if (freq < fLower || freq >= fUpper) {
                     continue;
                 }
                 const auto& ref = igd.getRefAllele(i);
                 const auto& alt = igd.getAltAllele(i);
-                CONDITION_PRINT(alleles, pos << SEP << ref << SEP << alt << SEP << sampleCt << SEP << igd.numSamples() << std::endl);
+                CONDITION_PRINT(alleles, pos << SEP << ref << SEP << alt << SEP << sampleCt << SEP << effectiveSampleCt << std::endl);
                 if (outfile) {
                     writer->writeVariantSamples(*igdOutfile,
                                                 pos,
@@ -284,14 +302,14 @@ int main(int argc, char *argv[]) {
             for (size_t i = 0; i < sampleToMuts.size(); i++) {
                 mutRefsTotal += sampleToMuts[i];
             }
-            const double avgMuts = (double)mutRefsTotal / (double)igd.numSamples();
+            const double avgMuts = (double)mutRefsTotal / (double)effectiveSampleCt;
             std::cout << "  Average var/sample: " << avgMuts << std::endl;
             double stddevMuts = 0.0;
             for (size_t i = 0; i < sampleToMuts.size(); i++) {
                 double diff = (double)sampleToMuts[i] - avgMuts;
                 stddevMuts += (diff*diff);
             }
-            stddevMuts = sqrt(stddevMuts/(double)igd.numSamples());
+            stddevMuts = sqrt(stddevMuts/(double)effectiveSampleCt);
             std::cout << "  Stddev var/sample: " << stddevMuts << std::endl;
         
             std::cout << "  Variants with missing data: " << missingRows << std::endl;
@@ -301,8 +319,16 @@ int main(int argc, char *argv[]) {
         if (outfile) {
             writer->writeIndex(*igdOutfile);
             writer->writeVariantInfo(*igdOutfile);
-            writer->writeIndividualIds(*igdOutfile, igd.getIndividualIds());
-            writer->writeVariantIds(*igdOutfile, igd.getVariantIds());
+            auto iids = igd.getIndividualIds();
+            if (!iids.empty()) {
+                iids.resize(numIndividuals);
+                writer->writeIndividualIds(*igdOutfile, iids);
+            }
+            auto vids = igd.getVariantIds();
+            if (!vids.empty()) {
+                vids.resize(numIndividuals);
+                writer->writeVariantIds(*igdOutfile, vids);
+            }
             igdOutfile->seekp(0);
             writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
         }
