@@ -10,7 +10,8 @@ starts at the 0th byte of the file, and is 128 bytes in size:
 | 16 | 4 | ploidy | Ploidy of each individual, >= 1 |
 | 20 | 4 | sparseThreshold | Threshold that determines whether a sample list is stored as a bitvector or sparse list. |
 | 24 | 8 | numVariants | The number of total variants in the file |
-| 32 | 8 | numIndividuals | The number of total individuals in the file |
+| 32 | 4 | numIndividuals | The number of total individuals in the file |
+| 36 | 4 | reserved | Reserved for future field. MUST be set to 0 when an IGD file is created |
 | 40 | 8 | flags | Bitwise flags; the only one right now is 0x1, which if set means the data is phased |
 | 48 | 8 | filePosIndex | The file position of the index describing the genomic and file positions of all variants. |
 | 56 | 8 | filePosVariants | The file position of the first variant data entry - this data does not contain genotypes, just information about variants |
