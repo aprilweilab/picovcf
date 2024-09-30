@@ -1318,7 +1318,8 @@ public:
         uint32_t ploidy;                // Ploidy of every individual.
         uint32_t sparseThreshold;       // Number of samples below which we store a variant sparsely.
         uint64_t numVariants;           // Total number of variants.
-        uint64_t numIndividuals;        // Total number of individuals.
+        uint32_t numIndividuals;        // Total number of individuals.
+        uint32_t unusedCenter;          // Unused
         uint64_t flags;                 // Flags that indicate properties of the dataset.
         uint64_t filePosIndex;          // Byte offset in the file where the variant rows start.
         uint64_t filePosVariants;       // Byte offset in the file where the variant allele information start.
@@ -1377,7 +1378,7 @@ public:
      * The number of individuals represented in the genotype data.
      * @return Number of individuals.
      */
-    VariantT numIndividuals() const {
+    SampleT numIndividuals() const {
         return m_header.numIndividuals;
     }
 
@@ -1690,7 +1691,7 @@ public:
      * @param[in] isPhased True if the data is phased, false otherwise.
      */
     IGDWriter(uint32_t ploidy,
-              uint64_t numIndividuals,
+              uint32_t numIndividuals,
               bool isPhased)
             : m_header({
                 IGDData::IGD_MAGIC,
@@ -1699,6 +1700,7 @@ public:
                 IGDData::DEFAULT_SPARSE_THRESHOLD,
                 0,
                 numIndividuals,
+                0,
                 isPhased ? IGDData::IGD_PHASED : 0x0,
                 0,
                 0,
