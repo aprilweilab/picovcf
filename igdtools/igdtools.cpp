@@ -229,6 +229,8 @@ int main(int argc, char* argv[]) {
         size_t sampleRefsTotal = 0;
         std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
 
+        auto vids = igd.getVariantIds();
+        std::vector<std::string> newVariantIds;
         size_t lastPosition = std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < igd.numVariants(); i++) {
             bool isMissing = false;
@@ -257,6 +259,9 @@ int main(int argc, char* argv[]) {
                                     << std::endl);
                 if (outfile) {
                     writer->writeVariantSamples(*igdOutfile, pos, ref, alt, sampleList, isMissing);
+                    if (!vids.empty() && !noVariantIds) {
+                        newVariantIds.emplace_back(vids.at(i));
+                    }
                 }
                 if (stats) {
                     variants++;
@@ -316,14 +321,15 @@ int main(int argc, char* argv[]) {
             writer->writeIndex(*igdOutfile);
             writer->writeVariantInfo(*igdOutfile);
             auto iids = igd.getIndividualIds();
-            if (!iids.empty()) {
+            if (!iids.empty() && !noIndividualIds) {
+                if (iids.size() < numIndividuals) {
+                    throw MalformedFile("Input file has invalid number of individual IDs");
+                }
                 iids.resize(numIndividuals);
                 writer->writeIndividualIds(*igdOutfile, iids);
             }
-            auto vids = igd.getVariantIds();
-            if (!vids.empty()) {
-                vids.resize(numIndividuals);
-                writer->writeVariantIds(*igdOutfile, vids);
+            if (!newVariantIds.empty() && !noVariantIds) {
+                writer->writeVariantIds(*igdOutfile, newVariantIds);
             }
             igdOutfile->seekp(0);
             writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
