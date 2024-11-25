@@ -1312,12 +1312,25 @@ public:
     // so we can't rely on them for a consistent serialization format. Instead we
     // "steal" the upper byte of the bpPosition to store whether or not the row at
     // the given position is sparse.
-    enum {
-        BP_POS_FLAGS_MASK = 0xFF00000000000000,
+    static constexpr uint64_t BP_POS_FLAGS_MASK = 0xFF00000000000000;
+    static constexpr uint64_t BP_POS_FLAGS_SPARSE = 0x0100000000000000;
+    static constexpr uint64_t BP_POS_FLAGS_IS_MISSING = 0x0200000000000000;
 
-        BP_POS_FLAGS_SPARSE = 0x0100000000000000,
-        BP_POS_FLAGS_IS_MISSING = 0x0200000000000000,
-    };
+    // We steal the next byte for indicating how many copies of the alternate allele
+    // are represented by the current variant. For example, a value of 2 for alt allele
+    // 'A' and ref allele 'T' means that the diploid has AA. A value of 1 means AT or
+    // TA (order is irrelevant), and the absence of the sample in any list means TT.
+    static constexpr uint64_t BP_POS_COPY_SHIFT = 48;
+    static constexpr uint64_t BP_POS_COPY_MASK = ((uint64_t)0xFF << BP_POS_COPY_SHIFT);
+
+    // The mask to get only the position value.
+    static constexpr uint64_t BP_POS_ONLY_MASK = ~(BP_POS_FLAGS_MASK | BP_POS_COPY_MASK);
+
+    // The maximum value of a position, (2^48)-1
+    static constexpr uint64_t MAX_BP_POSITION = 0x0000FFFFFFFFFFFF;
+
+    static_assert(MAX_BP_POSITION == BP_POS_ONLY_MASK, "Unexpected BP_POS mask");
+    static_assert((BP_POS_FLAGS_MASK & BP_POS_COPY_MASK) == 0, "Overlapping masks");
 
     struct IndexEntry {
         uint64_t bpPosition;     // The base-pair position of the variant.
@@ -1353,9 +1366,11 @@ public:
 
     /**
      * The number of variants in this file. Note that variants are binary in IGD,
-     * so this may not be the same number of variants that the corresponding VCF
-     * file would have (multiple alternate alleles get converted into their own
-     * variant).
+     * so this is not necessarily the same as the number of polymorphic sites (i.e.,
+     * rows in a VCF file). Also for unphased data, each number of copies that is
+     * stored is considered a variant, so e.g., for diploid datasets Aa and AA are
+     * considered separate variants.
+     *
      * @return Number of variants (rows of genotype data).
      */
     uint64_t numVariants() const { return m_header.numVariants; }
@@ -1412,15 +1427,37 @@ public:
      * Get the position of the given variant.
      * @param[in] variantIndex The 0-based index of the variant, i.e. the row
      * number.
+     * @param[out] isMissing Will be set to true if this variant represents
+     * missing data.
+     * @param[out] numCopies Will be set to the number of copies of the alternate
+     * allele that this variant represents.
+     * @return The position of the variant on the genome.
+     */
+    uint64_t getPosition(VariantT variantIndex, bool& isMissing, uint8_t& numCopies) {
+        const size_t offset = getVariantIndexOffset(variantIndex);
+        m_infile.seekg(offset);
+        PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+        const uint64_t position = readScalar<uint64_t>(m_infile);
+        isMissing = (bool)(position & BP_POS_FLAGS_IS_MISSING);
+        numCopies = (uint8_t)(position >> BP_POS_COPY_SHIFT);
+        return position & BP_POS_ONLY_MASK;
+    }
+
+    /**
+     * Get the position of the given variant.
+     * @param[in] variantIndex The 0-based index of the variant, i.e. the row
+     * number.
+     * @param[out] isMissing Will be set to true if this variant represents
+     * missing data.
      * @return The position of the variant on the genome.
      */
     uint64_t getPosition(VariantT variantIndex, bool& isMissing) {
         const size_t offset = getVariantIndexOffset(variantIndex);
         m_infile.seekg(offset);
         PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-        uint64_t position = readScalar<uint64_t>(m_infile);
+        const uint64_t position = readScalar<uint64_t>(m_infile);
         isMissing = (bool)(position & BP_POS_FLAGS_IS_MISSING);
-        return (position & ~BP_POS_FLAGS_MASK);
+        return position & BP_POS_ONLY_MASK;
     }
 
     /**
@@ -1499,13 +1536,15 @@ public:
             }
             return std::move(sampleList);
         } else {
-            const SampleT readAmount = picovcf_div_ceiling<SampleT, 8>(numSamples());
+            const bool phased = (bool)(m_header.flags & IGD_PHASED);
+            const SampleT numSamples = phased ? (m_header.ploidy * m_header.numIndividuals) : m_header.numIndividuals;
+            const SampleT readAmount = picovcf_div_ceiling<SampleT, 8>(numSamples);
             PICOVCF_RELEASE_ASSERT(readAmount > 0);
             std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
             if (buffer) {
                 m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
                 PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-                return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples());
+                return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples);
             }
         }
         return {};
@@ -1701,35 +1740,47 @@ public:
     }
 
     /**
-     * Write a multiple rows of sample/genotype data that correspond to a single
-     * genome position.
+     * Write a single variant (row) of sample/genotype data.
+     *
+     * This can be used for phased or unphased data: when phased the sample list always
+     * consists of haploid sample indexes, when unphased the sample list consists of
+     * individual indexes. For the former, indexes are 0 <= index < (ploidy*numIndividuals)
+     * and for the latter 0 <= index < numIndividuals.
+     *
      * @param[in] outStream The output stream.
      * @param[in] genomePosition The position of the variant on the genome.
      * @param[in] referenceAllele The string representing the reference allele.
      * @param[in] altAlleles The vector of strings representing the alternate
-     * alleles. Must be at least 1 alternate allele.
-     * @param[in] alleleIndexes A vector where the position in the vector
-     * corresponds to the sample index (so, position 0 is the 0th chromosome copy
-     * of the 0th individual). Each value in the vector is 0-altAlleles.size(),
-     * where 0 means reference allele and each non-zero value matches the
-     * altAllele at (value - 1) in the altAlleles vector. If data is missing for
-     *      a particular sample, then use picovcf::MISSING_VALUE at that index.
+     *      alleles. Must be at least 1 alternate allele.
+     * @param[in] sampleList A list of sample indexes. For phased diploid data, e.g.,
+     *      index 0 is the 0th chromosome copy of the 0th individual, index 1
+     *      is the 1st chromosome copy of the 0th individual, index 2 is the 0th
+     *      chromosome copy of the 1st individual, etc. For unphased data, index 0
+     *      is the 0th individual, index 1 is the 1st individual, etc.
+     * @param[in] numCopes [Optional] Required only for unphased data. The number of
+     *      copies of the alternate allele this variant represents, 0 < copies <= ploidy.
+     * @param[in] isMissing [Optional] when set to true, this row represents all the
+     *      samples that have missing data at the given polymorphic site.
      */
     void writeVariantSamples(std::ostream& outStream,
                              const uint64_t genomePosition,
                              const std::string& referenceAllele,
                              const std::string& altAllele,
                              const IGDSampleList& sampleList,
-                             const bool isMissing = false) {
-        const SampleT numSamples = (m_header.ploidy * m_header.numIndividuals);
+                             const bool isMissing = false,
+                             const uint8_t numCopies = 0) {
+        const bool phased = (bool)(m_header.flags & IGDData::IGD_PHASED);
+        const SampleT numSamples = phased ? (m_header.ploidy * m_header.numIndividuals) : m_header.numIndividuals;
         const VariantT variantIndex = m_header.numVariants;
         assert(sampleList.size() <= numSamples);
+        assert(phased || numCopies > 0);
+        assert(phased || numCopies <= m_header.ploidy);
 
         m_referenceAlleles.emplace_back(referenceAllele);
         m_alternateAlleles.emplace_back(altAllele);
 
         const bool isSparse = (sampleList.size() <= (numSamples / IGDData::DEFAULT_SPARSE_THRESHOLD));
-        m_index.push_back(std::move(makeEntry(genomePosition, isSparse, isMissing, outStream.tellp())));
+        m_index.push_back(std::move(makeEntry(genomePosition, isSparse, isMissing, numCopies, outStream.tellp())));
         if (isSparse) {
             writeSparse(outStream, sampleList);
             m_sparseCount++;
@@ -1835,11 +1886,17 @@ private:
         }
     }
 
-    IGDData::IndexEntry
-    makeEntry(VariantT genomePosition, const bool isSparse, const bool isMissing, std::streamoff filePosition) {
+    IGDData::IndexEntry makeEntry(VariantT genomePosition,
+                                  const bool isSparse,
+                                  const bool isMissing,
+                                  uint8_t numCopies,
+                                  std::streamoff filePosition) {
         uint64_t position = static_cast<uint64_t>(genomePosition);
-        if ((IGDData::BP_POS_FLAGS_MASK & position) != 0) {
+        if (position > IGDData::MAX_BP_POSITION) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Given genome position is too large: " << genomePosition);
+        }
+        if (numCopies > 0) {
+            position |= ((uint64_t)numCopies) << IGDData::BP_POS_COPY_SHIFT;
         }
         if (isSparse) {
             position |= IGDData::BP_POS_FLAGS_SPARSE;
@@ -1900,26 +1957,48 @@ inline void vcfToIGD(const std::string& vcfFilename,
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
         auto altAlleles = variant.getAltAlleles();
         IGDSampleList missingData;
-        std::vector<IGDSampleList> variantGtData(altAlleles.size());
+        const size_t numSampleLists = isPhased ? altAlleles.size() : (altAlleles.size() * ploidy);
+        std::vector<IGDSampleList> variantGtData(numSampleLists);
         SampleT sampleIndex = 0;
         while (individualIt.hasNext()) {
             const bool isPhasedI = individualIt.getAlleles(allele1, allele2);
             PICOVCF_ASSERT_OR_MALFORMED(isPhasedI == isPhased, "Cannot convert VCF with mixed phasedness");
             const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
             PICOVCF_ASSERT_OR_MALFORMED(ploidyI == ploidy, "Cannot convert VCF with mixed ploidy");
-            if (allele1 == MISSING_VALUE) {
-                missingData.push_back(sampleIndex);
-            } else if (allele1 > 0) {
-                variantGtData.at(allele1 - 1).push_back(sampleIndex);
-            }
-            sampleIndex++;
-            if (ploidy == 2) {
-                if (allele2 == MISSING_VALUE) {
+            if (isPhased) {
+                if (allele1 == MISSING_VALUE) {
                     missingData.push_back(sampleIndex);
-                } else if (allele2 > 0) {
-                    variantGtData.at(allele2 - 1).push_back(sampleIndex);
+                } else if (allele1 > 0) {
+                    variantGtData.at(allele1 - 1).push_back(sampleIndex);
                 }
                 sampleIndex++;
+                if (ploidy == 2) {
+                    if (allele2 == MISSING_VALUE) {
+                        missingData.push_back(sampleIndex);
+                    } else if (allele2 > 0) {
+                        variantGtData.at(allele2 - 1).push_back(sampleIndex);
+                    }
+                    sampleIndex++;
+                }
+                // sampleIndex refers to _haploid samples_ for unphased data.
+            } else {
+                if (allele1 == MISSING_VALUE || allele2 == MISSING_VALUE) {
+                    missingData.push_back(sampleIndex);
+                } else if (allele1 == allele2 && allele1 > 0) {
+                    // This corresponds to a "2" (numCopies)
+                    variantGtData.at((allele1 - 1) + altAlleles.size()).push_back(sampleIndex);
+                } else {
+                    // These correspond to a "1" (numCopies). We can have two "1"s in the case where the
+                    // alt alleles are different. It is up to the downstream use-case how to handle this
+                    // (e.g., filter the lower frequency one out, adjust the calculation to handle it, etc.)
+                    if (allele1 > 0) {
+                        variantGtData.at(allele1 - 1).push_back(sampleIndex);
+                    }
+                    if (allele2 > 0) {
+                        variantGtData.at(allele2 - 1).push_back(sampleIndex);
+                    }
+                }
+                sampleIndex++; // sampleIndex refers to _individuals_ for unphased data.
             }
         }
         std::string currentVariantId;
@@ -1927,12 +2006,24 @@ inline void vcfToIGD(const std::string& vcfFilename,
             currentVariantId = variant.getID();
         }
         for (size_t altIndex = 0; altIndex < altAlleles.size(); altIndex++) {
-            writer.writeVariantSamples(outFile,
-                                       variant.getPosition(),
-                                       variant.getRefAllele(),
-                                       altAlleles[altIndex],
-                                       variantGtData[altIndex],
-                                       false);
+            const auto position = variant.getPosition();
+            const auto& ref = variant.getRefAllele();
+            const auto& alt = altAlleles[altIndex];
+            const uint8_t numCopies = isPhased ? 0 : 1;
+            writer.writeVariantSamples(outFile, position, ref, alt, variantGtData[altIndex], false, numCopies);
+            if (!isPhased && ploidy > 1) {
+                const size_t copies2Index = altIndex + altAlleles.size();
+                const auto& sampleList = variantGtData[copies2Index];
+                if (!sampleList.empty()) {
+                    writer.writeVariantSamples(outFile,
+                                               position,
+                                               ref,
+                                               alt,
+                                               sampleList,
+                                               false,
+                                               /*numCopies=*/2);
+                }
+            }
             if (emitVariantIds) {
                 variantIds.emplace_back(currentVariantId);
             }

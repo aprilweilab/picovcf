@@ -246,8 +246,8 @@ int main(int argc, char* argv[]) {
                         sampleList.resize(j);
                     }
                 }
-                assert(sampleCt <= effectiveSampleCt);
                 const auto sampleCt = sampleList.size();
+                assert(sampleCt <= effectiveSampleCt);
                 const double freq = (double)sampleCt / (double)effectiveSampleCt;
                 if (freq < fLower || freq >= fUpper) {
                     continue;

@@ -24,6 +24,10 @@ const std::string getMISSING_DATA_EXAMPLE_FILE() {
     return getExampleDir() + "/missing.vcf";
 }
 
+const std::string getUNPHASED_DATA_EXAMPLE_FILE() {
+    return getExampleDir() + "/unphased.example.vcf";
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
