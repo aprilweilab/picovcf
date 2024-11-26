@@ -1385,7 +1385,12 @@ public:
      * IGD files have a fixed ploidy, so this is just getPloidy()*numIndividuals()
      * @return Number of samples (haplotypes).
      */
-    SampleT numSamples() const { return m_header.numIndividuals * m_header.ploidy; }
+    SampleT numSamples() const {
+        if (m_header.flags & IGD_PHASED) {
+            return m_header.numIndividuals * m_header.ploidy;
+        }
+        return numIndividuals();
+    }
 
     /**
      * A string describing where this file came from.
@@ -1865,7 +1870,7 @@ public:
             m_header.filePosVariantIds = outStream.tellp();
             PICOVCF_RELEASE_ASSERT(0 != m_header.filePosVariantIds);
             if (labels.size() != m_header.numVariants) {
-                PICOVCF_THROW_ERROR(ApiMisuse, "Must provide one label per individual");
+                PICOVCF_THROW_ERROR(ApiMisuse, "Must provide one label per variant");
             }
 
             writeScalar<uint64_t>(labels.size(), outStream);
@@ -1925,13 +1930,16 @@ private:
  * (false by default).
  * @param[in] emitVariantIds [Optional] Copy variant IDs to IGD file (false by
  * default).
+ * @param[in] forceUnphased [Optional] When true, force the result to be unphased
+ * even if the input is phased (or mixed phased-ness).
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
                      std::string description = "",
                      bool verbose = false,
                      bool emitIndividualIds = false,
-                     bool emitVariantIds = false) {
+                     bool emitVariantIds = false,
+                     bool forceUnphased = false) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1943,7 +1951,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
     PICOVCF_ASSERT_OR_MALFORMED(firstIndividual.hasNext(), "VCF file has no genotype data");
     VariantT allele1 = 0;
     VariantT allele2 = 0;
-    const bool isPhased = firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
+    const bool isPhased = forceUnphased || firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
     const uint64_t ploidy = (allele2 == NOT_DIPLOID) ? 1 : 2;
 
     std::vector<std::string> variantIds;
@@ -1962,7 +1970,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
         SampleT sampleIndex = 0;
         while (individualIt.hasNext()) {
             const bool isPhasedI = individualIt.getAlleles(allele1, allele2);
-            PICOVCF_ASSERT_OR_MALFORMED(isPhasedI == isPhased, "Cannot convert VCF with mixed phasedness");
+            PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || isPhasedI == isPhased,
+                                        "Cannot convert VCF with mixed phasedness, unless forceUnphased is set");
             const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
             PICOVCF_ASSERT_OR_MALFORMED(ploidyI == ploidy, "Cannot convert VCF with mixed ploidy");
             if (isPhased) {
@@ -2022,6 +2031,9 @@ inline void vcfToIGD(const std::string& vcfFilename,
                                                sampleList,
                                                false,
                                                /*numCopies=*/2);
+                    if (emitVariantIds) {
+                        variantIds.emplace_back(currentVariantId);
+                    }
                 }
             }
             if (emitVariantIds) {

@@ -69,6 +69,8 @@ int main(int argc, char* argv[]) {
     args::Flag noVariantIds(
         parser, "noVariantIds", "Do not emit IDs for variants in the resulting IGD file.", {"no-var-ids"});
     args::ValueFlag<size_t> trimSamples(parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
+    args::Flag forceUnphasedArg(
+        parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -101,14 +103,14 @@ int main(int argc, char* argv[]) {
     const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
     if (isVcf) {
         if (!outfile) {
-            std::cerr << "VCF input is only supported for conversion to IGD. Use --output." << std::endl;
+            std::cerr << "VCF input is only supported for conversion to IGD. Use --out." << std::endl;
             return 1;
         }
         UNSUPPORTED_FOR_VCF(range, "--range");
 
         const bool emitIndividualIds = !noIndividualIds;
         const bool emitVariantIds = !noVariantIds;
-        vcfToIGD(*infile, *outfile, description, true, emitIndividualIds, emitVariantIds);
+        vcfToIGD(*infile, *outfile, description, true, emitIndividualIds, emitVariantIds, forceUnphasedArg);
         return 0;
     }
 
@@ -159,12 +161,13 @@ int main(int argc, char* argv[]) {
     const size_t numSamples = igd.numSamples();
     size_t effectiveSampleCt = numSamples;
     if (trimSamples) {
-        effectiveSampleCt = ploidy * (*trimSamples);
+        effectiveSampleCt = igd.isPhased() ? (ploidy * (*trimSamples)) : (*trimSamples);
         if (effectiveSampleCt > numSamples) {
             std::cerr << "--trim value is larger than the number of individuals" << std::endl;
             return 2;
         }
-        std::cout << "Trimming to " << effectiveSampleCt << " haploid samples" << std::endl;
+        std::cout << "Trimming to " << effectiveSampleCt << (igd.isPhased() ? " haploid" : "") << " samples"
+                  << std::endl;
     }
 
     if (info) {
@@ -205,20 +208,30 @@ int main(int argc, char* argv[]) {
         }                                                                                                              \
     } while (0)
 
+    const bool forcingUnphased = forceUnphasedArg && igd.isPhased();
+    if (forcingUnphased && ploidy > std::numeric_limits<uint8_t>::max()) {
+        std::cerr << "Cannot store data with ploidy " << ploidy << " as unphased" << std::endl;
+        return 2;
+    }
     std::shared_ptr<std::ofstream> igdOutfile;
     std::shared_ptr<IGDWriter> writer;
-    const uint64_t numIndividuals = effectiveSampleCt / ploidy;
+    const uint64_t numIndividuals = igd.isPhased() ? (effectiveSampleCt / ploidy) : effectiveSampleCt;
     if (outfile) {
         igdOutfile = std::make_shared<std::ofstream>(*outfile, std::ios::binary);
-        writer = std::make_shared<IGDWriter>(ploidy, numIndividuals, igd.isPhased());
+        writer = std::make_shared<IGDWriter>(ploidy, numIndividuals, !forcingUnphased && igd.isPhased());
         writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
     }
 
     const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile;
     if (iterateSamples) {
         static constexpr char SEP = '\t';
-        CONDITION_PRINT(
-            alleles, "POSITION" << SEP << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP << "TOTAL" << std::endl);
+        std::stringstream copySS;
+        if (!igd.isPhased()) {
+            copySS << "COPIES" << SEP;
+        }
+        CONDITION_PRINT(alleles,
+                        "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP
+                                   << "TOTAL" << std::endl);
 
         size_t sites = 0;
         bool _ignore = false;
@@ -233,8 +246,9 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> newVariantIds;
         size_t lastPosition = std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < igd.numVariants(); i++) {
+            uint8_t numCopies = 0;
             bool isMissing = false;
-            auto pos = igd.getPosition(i, isMissing);
+            auto pos = igd.getPosition(i, isMissing, numCopies);
             if (pos >= bpStart && pos <= bpEnd) {
                 auto sampleList = igd.getSamplesWithAlt(i);
                 if (trimSamples) {
@@ -254,13 +268,46 @@ int main(int argc, char* argv[]) {
                 }
                 const auto& ref = igd.getRefAllele(i);
                 const auto& alt = igd.getAltAllele(i);
-                CONDITION_PRINT(alleles,
-                                pos << SEP << ref << SEP << alt << SEP << sampleCt << SEP << effectiveSampleCt
-                                    << std::endl);
+                if (alleles) {
+                    std::cout << pos << SEP;
+                    if (!igd.isPhased()) {
+                        std::cout << (uint64_t)numCopies << SEP;
+                    }
+                    std::cout << ref << SEP << alt << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
+                }
                 if (outfile) {
-                    writer->writeVariantSamples(*igdOutfile, pos, ref, alt, sampleList, isMissing);
-                    if (!vids.empty() && !noVariantIds) {
-                        newVariantIds.emplace_back(vids.at(i));
+                    if (!forcingUnphased) {
+                        writer->writeVariantSamples(*igdOutfile, pos, ref, alt, sampleList, isMissing, numCopies);
+                        if (!vids.empty() && !noVariantIds) {
+                            newVariantIds.emplace_back(vids.at(i));
+                        }
+                    } else {
+                        std::vector<IGDSampleList> samplesByCopies(ploidy);
+                        SampleT startSampleId = SAMPLE_INDEX_NOT_SET;
+                        size_t numCopies = 0;
+                        for (const auto& sampleId : sampleList) {
+                            if (sampleId >= (startSampleId + ploidy) || startSampleId == SAMPLE_INDEX_NOT_SET) {
+                                if (numCopies > 0) {
+                                    samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
+                                }
+                                numCopies = 1;
+                                startSampleId = (sampleId / ploidy) * ploidy; // Round down by ploidy
+                            } else {
+                                numCopies++;
+                            }
+                        }
+                        if (numCopies > 0) {
+                            samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
+                        }
+                        for (uint8_t nc = 1; nc <= ploidy; nc++) {
+                            const auto& copySampleList = samplesByCopies[nc - 1];
+                            if (!copySampleList.empty()) {
+                                writer->writeVariantSamples(*igdOutfile, pos, ref, alt, copySampleList, isMissing, nc);
+                                if (!vids.empty() && !noVariantIds) {
+                                    newVariantIds.emplace_back(vids.at(i));
+                                }
+                            }
+                        }
                     }
                 }
                 if (stats) {
