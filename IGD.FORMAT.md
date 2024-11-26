@@ -31,22 +31,25 @@ Immediately after the header are two variable-sized string fields:
 
 Immediately following the header and string fields is the sample row data. This data should be accessed only via the corresponding `IndexEntry`, which describes the layout.
 
-Note that we only support one alternate per variant, which means that converting from a file format like VCF requires "expanding" the variants. A single VCF variant with `N` alternate alleles will become `N` IGD variants.
+Note that we only support one alternate per variant, which means that converting from a file format like VCF requires "expanding" the variants. A single VCF polymorphic site with `N` alternate alleles will become `N` IGD variants.
 
-The header, string firleds, and sample rows are the only required-to-be-contiguous parts of the IGD file. The remaining sections can be anywhere in the file (_after_ the above), and use the header fields to indicate where they are.
+The header, string fields, and sample rows are the only required-to-be-contiguous parts of the IGD file. The remaining sections can be anywhere in the file (_after_ the above), and use the header fields to indicate where they are.
 Each row of sample data corresonds to the list of samples that have the alternate allele of the given (bi-allelic) variant. When the row is flagged as a "missing data row", the sample list corresponds to samples that do not have an allele for the given site, in the dataset. Each row of sample data can be encoded as either a "SizedList" or "BitVector" -- see below.
+
+For phased data, a sample index is the _haploid_ sample index (so `0 <= index < numIndividuals*ploidy`). For unphased
+data, a sample index is the _individual_ sample index (so `0 <= index < numIndividuals`).
 
 ### SizedList Samples
 
 The "SizedList" is a sparse representation of the samples as a list of indexes. If the list contains value `i`, then the `ith` sample has the alternate allele represented by the particular row.
 
 The layout is:
-  * A 4-byte unsigned integer: the number of samples `k` (NOT individuals) that are in the list.
-  * `k` consecutive 4-byte unsigned integers: the index that corresponds to the sample in the list: this value is between `0...((ploidy*numIndividuals)-1)`.
+  * A 4-byte unsigned integer: the number of samples `k` (individuals for unphased, haploid samples for phased) that are in the list.
+  * `k` consecutive 4-byte unsigned integers: the index that corresponds to the sample in the list: this value is between `0...((ploidy*numIndividuals)-1)` (phased) or `0...numIndividuals-1` for (unphased).
 
 ### BitVector Samples
 
-The non-sparse representation of the samples as a bitvector. A `1` indicates the alternate allele, a `0` represents the reference allele. There are `ploidy*numIndividuals` bits, rounded up to the next byte (i.e., `ceil( (ploidy*numIndividuals) / 8)`). The end of the row can by found by `startingPosition + (((numIndividuals * ploidy) + 7) / 8)`. Bit `startingPosition + i` refers to the `ith` sample.
+The non-sparse representation of the samples as a bitvector. A `1` indicates the alternate allele, a `0` represents the reference allele. There are `numSamples` bits, rounded up to the next byte (i.e., `ceil( numSamples / 8)`). The end of the row can by found by `startingPosition + ((numSamples + 7) / 8)`. Bit `startingPosition + i` refers to the `ith` sample.
 
 ## Variant Information (REQUIRED)
 
@@ -74,5 +77,6 @@ At position identified by `filePosIndex` is the file index. There are `numVarian
 | Byte Offset | Byte Size | Name | Description |
 | ---- | ---- | ---- | ---- |
 | 0 | 1 | flags | Flags describing properties of this variant. Can be 0 (nothing) or a bitwise combination of: `SPARSE=0x1`, `IS_MISSING=0x2` |
-| 1 | 7 | bpPosition | The position on the genome in base pairs for this variant. |
+| 1 | 2 | numCopies | 8-byte unsigned integer indicates how many copies of the alternate allele this variant represents. Will be `0` for phased data, and between `1...ploidy` for unphased data. I.e., for unphased data the `AA` (`numCopies = 2`) and `Aa` (`numCopies=1`) sample lists will be stored as separate variants in the IGD file. |
+| 2 | 7 | bpPosition | The position on the genome in base pairs for this variant. |
 | 8 | 8 | filePosDataRow | The file position for the sample row. This can be sparse (see `SizedList`) or a bit vector (see `BitVector`), depending on if flag `SPARSE` is set. If `IS_MISSING` flag is set, this represents missing data from this variant. |
