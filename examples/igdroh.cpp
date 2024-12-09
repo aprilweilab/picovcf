@@ -37,7 +37,7 @@ int main(int argc, char* argv[]) {
         uint8_t numCopies = 0;
         position = igd.getPosition(i, isMissing, numCopies);
         assert(numCopies > 0); // This should always be true for unphased data
-        if (numCopies == 1) {
+        if (numCopies < igd.getPloidy()) {
             for (const auto indivIndex : igd.getSamplesWithAlt(i)) {
                 const uint64_t homozygSpan = (position - lastHeteroSitePerIndiv[indivIndex]);
                 if (homozygSpan >= THRESHOLD) {
