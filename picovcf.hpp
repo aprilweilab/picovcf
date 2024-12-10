@@ -1382,8 +1382,10 @@ public:
     SampleT numIndividuals() const { return m_header.numIndividuals; }
 
     /**
-     * IGD files have a fixed ploidy, so this is just getPloidy()*numIndividuals()
-     * @return Number of samples (haplotypes).
+     * IGD files have a fixed ploidy, so this is either getPloidy()*numIndividuals()
+     * (for phased data) or the same as numIndividuals() (for unphased).
+     *
+     * @return Number of samples. Every sample index will be >= 0 and < numSamples().
      */
     SampleT numSamples() const {
         if (m_header.flags & IGD_PHASED) {
