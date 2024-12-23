@@ -14,6 +14,8 @@ Features:
 
 More details can be found in the supplement of our [preprint "Genotype Representation Graph" paper](https://www.biorxiv.org/content/10.1101/2024.04.23.590800v1).
 
+See also [pyigd](https://github.com/aprilweilab/pyigd/) if you want Python access to IGD files.
+
 ## Using the library
 
 Either copy the latest header file (`picovcf.hpp`) into your project directly, or make use of something like git submodules to include https://github.com/aprilweilab/picovcf.
@@ -87,4 +89,4 @@ Converting the `.vcf.gz` to `.bgen` (via qctool) took 23 minutes, but converting
 * Use `igdtools` to convert and process files
 * Do one of the following:
   * If your project is C++, copy [picovcf.hpp](https://github.com/aprilweilab/picovcf/blob/main/picovcf.hpp) into your project, `#include` it somewhere and then use according to the [documentation](https://picovcf.readthedocs.io/en/latest/)
-  * If your project is Python, clone [pyigd](https://github.com/aprilweilab/pyigd/) and install it per the [README instructions](https://github.com/aprilweilab/pyigd/blob/main/README.md).
+  * If your project is Python, you can install [pyigd](https://github.com/aprilweilab/pyigd/) via `pip install pyigd` (see [the docs](https://pyigd.readthedocs.io/en/latest/))
