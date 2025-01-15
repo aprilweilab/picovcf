@@ -28,6 +28,11 @@ const std::string getUNPHASED_DATA_EXAMPLE_FILE() {
     return getExampleDir() + "/unphased.example.vcf";
 }
 
+const std::string getHAPLOID_DATA_EXAMPLE_FILE() {
+    return getExampleDir() + "/haploid.example.vcf";
+}
+
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
