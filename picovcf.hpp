@@ -475,7 +475,7 @@ public:
         if (m_currentPosition == std::string::npos) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Iterator is at end of individuals");
         }
-        size_t stopAt = m_currentLine.find_first_of(":\t", m_currentPosition);
+        size_t stopAt = m_currentLine.find_first_of(":\t\r", m_currentPosition);
         size_t length = 0;
         if (stopAt == std::string::npos) {
             length = m_currentLine.size() - m_currentPosition;
