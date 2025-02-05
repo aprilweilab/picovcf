@@ -71,6 +71,16 @@ int main(int argc, char* argv[]) {
     args::ValueFlag<size_t> trimSamples(parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
     args::Flag forceUnphasedArg(
         parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
+    args::Flag dropMulti(
+        parser, "dropMulti", "Drop multi-allelic sites (more than one alternate allele).", {"drop-multi"});
+    args::ValueFlag<std::string> handlePloidy(
+        parser,
+        "handlePloidy",
+        "IGD files have a single ploidy, how should VCF files that violate this be handled? "
+        "Options:\n"
+        "  \"strict\": Fail if mixed ploidy is encountered\n"
+        "  \"force-diploid\": Force all samples to have diploid data, by mirroring haploid samples\n",
+        {'p', "handle-ploidy"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -98,6 +108,14 @@ int main(int argc, char* argv[]) {
         }                                                                                                              \
     } while (0)
 
+#define ONLY_SUPPORTED_FOR_VCF(parameter, parameterName)                                                               \
+    do {                                                                                                               \
+        if ((bool)(parameter)) {                                                                                       \
+            std::cerr << "Parameter " << (parameterName) << " is only supported for VCF file conversion" << std::endl; \
+            return 1;                                                                                                  \
+        }                                                                                                              \
+    } while (0)
+
     std::string description = outputDescription ? *outputDescription : "";
 
     const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
@@ -107,11 +125,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         UNSUPPORTED_FOR_VCF(range, "--range");
+        UNSUPPORTED_FOR_VCF(dropMulti, "--dropMulti");
 
         const bool emitIndividualIds = !noIndividualIds;
         const bool emitVariantIds = !noVariantIds;
-        vcfToIGD(*infile, *outfile, description, true, emitIndividualIds, emitVariantIds, forceUnphasedArg);
+        const PloidyHandling hploidy =
+            handlePloidy ? (*handlePloidy == "force-diploid" ? PH_FORCE_DIPLOID : PH_STRICT) : PH_STRICT;
+        vcfToIGD(*infile, *outfile, description, true, emitIndividualIds, emitVariantIds, forceUnphasedArg, hploidy);
         return 0;
+    } else {
+        ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
     }
 
     // Not a VCF, then assume it is IGD and load the header.
@@ -242,10 +265,39 @@ int main(int argc, char* argv[]) {
         size_t sampleRefsTotal = 0;
         std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
 
+        std::vector<bool> skipVariant(igd.numVariants(), false);
+        size_t skipped = 0;
+        if (dropMulti) {
+            size_t lastIndex = 0;
+            size_t lastPosition = std::numeric_limits<size_t>::max();
+            for (size_t i = 0; i < igd.numVariants(); i++) {
+                uint8_t numCopies = 0;
+                bool isMissing = false;
+                auto pos = igd.getPosition(i, isMissing, numCopies);
+                if (isMissing) {
+                    continue; // Ignore missing data rows, they aren't relevant to this calculation.
+                }
+                if (pos == lastPosition && !isMissing) {
+                    if (!skipVariant[lastIndex]) {
+                        skipVariant[lastIndex] = true;
+                        skipped++;
+                    }
+                    skipVariant[i] = true;
+                    skipped++;
+                }
+                lastPosition = pos;
+                lastIndex = i;
+            }
+            std::cerr << "Skipped " << skipped << " variants at multi-allelic sites" << std::endl;
+        }
+
         auto vids = igd.getVariantIds();
         std::vector<std::string> newVariantIds;
         size_t lastPosition = std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < igd.numVariants(); i++) {
+            if (skipVariant[i]) {
+                continue;
+            }
             uint8_t numCopies = 0;
             bool isMissing = false;
             auto pos = igd.getPosition(i, isMissing, numCopies);

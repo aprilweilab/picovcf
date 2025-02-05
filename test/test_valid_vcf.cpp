@@ -9,6 +9,7 @@ using namespace picovcf;
 extern const std::string getVCF42_EXAMPLE_FILE();
 extern const std::string getMSPRIME_EXAMPLE_FILE();
 extern const std::string getHAPLOID_DATA_EXAMPLE_FILE();
+extern const std::string getMIXED_DATA_EXAMPLE_FILE();
 
 TEST(ValidVCF, SpecExample) {
     const size_t EXPECT_VARIANTS = 6;
@@ -175,6 +176,33 @@ TEST(ValidVCF, Haploid) {
             const bool isPhased = iterator.getAlleles(allele1, allele2);
             ASSERT_TRUE(isPhased);
             ASSERT_EQ(allele2, NOT_DIPLOID);
+        }
+    }
+    ASSERT_FALSE(vcf.hasNextVariant());
+}
+
+TEST(ValidVCF, MixedPloidy) {
+    const size_t EXPECT_VARIANTS = 4;
+    VCFFile vcf(getMIXED_DATA_EXAMPLE_FILE());
+
+    ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+    ASSERT_EQ(vcf.numIndividuals(), 10000);
+
+    vcf.seekBeforeVariants();
+    for (size_t i = 0; i < EXPECT_VARIANTS; i++) {
+        ASSERT_TRUE(vcf.hasNextVariant());
+        vcf.nextVariant();
+        VCFVariantView variant = vcf.currentVariant();
+        IndividualIteratorGT iterator = variant.getIndividualIterator();
+        while (iterator.hasNext()) {
+            VariantT allele1 = 0;
+            VariantT allele2 = 0;
+            const bool isPhased = iterator.getAlleles(allele1, allele2);
+            ASSERT_TRUE(isPhased);
+            // The first 2 variants are entirely haploid.
+            if (i < 2) {
+                ASSERT_EQ(allele2, NOT_DIPLOID);
+            }
         }
     }
     ASSERT_FALSE(vcf.hasNextVariant());

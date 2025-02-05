@@ -253,6 +253,11 @@ public:
                 found = true;
             }
         }
+        // Trim carriage returns. Windows ends lines with "\r\n" and Unix is just "\n",
+        // so VCF files generated on Windows can have a "\r" at the end of our line.
+        while (lineBytes > 0 && buffer[lineBytes - 1] == '\r') {
+            lineBytes--;
+        }
         buffer.resize(lineBytes);
         return lineBytes;
     }
@@ -1170,6 +1175,11 @@ static inline std::string readString(const uint64_t version, std::istream& inStr
     return std::move(strValue);
 }
 
+enum PloidyHandling {
+    PH_STRICT = 0,        /*!< Strict ploidy handling: retain ploidy, only allow a single ploidy for all data. */
+    PH_FORCE_DIPLOID = 1, /*!< Force all variants to diploid, making both alleles identical for haploid input. */
+};
+
 /** Vector of sample indexes (IDs) */
 using IGDSampleList = std::vector<SampleT>;
 
@@ -1918,7 +1928,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      bool verbose = false,
                      bool emitIndividualIds = false,
                      bool emitVariantIds = false,
-                     bool forceUnphased = false) {
+                     bool forceUnphased = false,
+                     const PloidyHandling handlePloidy = PH_STRICT) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1931,7 +1942,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
     VariantT allele1 = 0;
     VariantT allele2 = 0;
     const bool isPhased = forceUnphased || firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
-    const uint64_t ploidy = (allele2 == NOT_DIPLOID) ? 1 : 2;
+    const uint64_t ploidy = (handlePloidy == PH_STRICT ? ((allele2 == NOT_DIPLOID) ? 1 : 2) : 2);
+    PICOVCF_RELEASE_ASSERT(handlePloidy != PH_FORCE_DIPLOID || ploidy == 2);
 
     std::vector<std::string> variantIds;
     std::ofstream outFile(outFilename, std::ios::binary);
@@ -1952,7 +1964,15 @@ inline void vcfToIGD(const std::string& vcfFilename,
             PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || isPhasedI == isPhased,
                                         "Cannot convert VCF with mixed phasedness, unless forceUnphased is set");
             const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
-            PICOVCF_ASSERT_OR_MALFORMED(ploidyI == ploidy, "Cannot convert VCF with mixed ploidy");
+            if (handlePloidy == PH_STRICT) {
+                PICOVCF_ASSERT_OR_MALFORMED(
+                    ploidyI == ploidy,
+                    "Will not convert VCF with mixed ploidy with PH_STRICT, see PloidyHandling options");
+            } else if (handlePloidy == PH_FORCE_DIPLOID) {
+                if (ploidyI != 2) {
+                    allele2 = allele1;
+                }
+            }
             if (isPhased) {
                 if (allele1 == MISSING_VALUE) {
                     missingData.push_back(sampleIndex);

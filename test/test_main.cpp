@@ -32,6 +32,10 @@ const std::string getHAPLOID_DATA_EXAMPLE_FILE() {
     return getExampleDir() + "/haploid.example.vcf";
 }
 
+const std::string getMIXED_DATA_EXAMPLE_FILE() {
+    return getExampleDir() + "/mixploidy.example.vcf";
+}
+
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

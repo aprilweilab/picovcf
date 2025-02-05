@@ -8,6 +8,7 @@ using namespace picovcf;
 
 extern const std::string getMISSING_DATA_EXAMPLE_FILE();
 extern const std::string getUNPHASED_DATA_EXAMPLE_FILE();
+extern const std::string getMIXED_DATA_EXAMPLE_FILE();
 
 TEST(IGD, MissingData) {
     std::string igdFileName = "missing_data.igd";
@@ -57,4 +58,33 @@ TEST(IGD, UnphasedData) {
     }
     ASSERT_EQ(totalOnes, 90+325+146+129);
     ASSERT_EQ(totalTwos, 2+2+1);
+}
+
+TEST(IGD, MixedPloidyData) {
+    std::string igdFileName = "mixed_ploidy.igd";
+    vcfToIGD(getMIXED_DATA_EXAMPLE_FILE(), igdFileName, "", false, true, true, false, PH_FORCE_DIPLOID);
+
+    IGDData igdFile(igdFileName);
+
+	const size_t numSamples = igdFile.numSamples();
+    ASSERT_EQ(numSamples, 20000);
+    ASSERT_EQ(igdFile.numVariants(), 4);
+    // First 2 variants were haploid data in the VCF file, so they should have been "mirrored"
+    // to diploid (so both alleles are the same).
+    for (size_t i = 0; i < 2; i++) {
+        bool isMissing = false;
+        uint8_t numCopies = 0;
+        igdFile.getPosition(i, isMissing, numCopies);
+        ASSERT_FALSE(isMissing);
+        ASSERT_EQ(numCopies, 0);
+        auto sampleList = igdFile.getSamplesWithAlt(i);
+        SampleT prevSample = SAMPLE_INDEX_NOT_SET;
+        for (const auto index : sampleList) {
+            if (index % 2 == 0) {
+                prevSample = index;
+            } else {
+                ASSERT_EQ(prevSample, index - 1);
+            }
+        }
+    }
 }
