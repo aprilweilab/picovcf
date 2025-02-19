@@ -44,5 +44,25 @@ class TestIgdTools(unittest.TestCase):
             quiet_del("msprime.example.igd")
             quiet_del("msprime.example.dephased.igd")
 
+    def test_unphased_from_vcf(self):
+        # Same as test_unphased_from_igd, except we unphase the file while converting from VCF
+
+        # Convert unphased VCF to IGD
+        run(["igdtools", input("unphased.example.vcf"), "--out", "unphased2.example.igd"])
+
+        # Convert phased VCF to IGD, then convert phased IGD to unphased IGD
+        run(["igdtools", input("msprime.example.vcf"), "--force-unphased", "--out",  "msprime.example.dephased2.igd"])
+
+        unphased_result = run(["igdtools", "unphased2.example.igd", "--alleles"]).decode("utf-8")
+        dephased_result = run(["igdtools", "msprime.example.dephased2.igd", "--alleles"]).decode("utf-8")
+
+        self.assertEqual(unphased_result, dephased_result)
+        line_count = len(list(filter(lambda x: len(x.strip()) > 0, unphased_result.split("\n"))))
+        self.assertEqual(line_count, 8)
+
+        if CLEANUP:
+            quiet_del("unphased2.example.igd")
+            quiet_del("msprime.example.dephased2.igd")
+
 if __name__ == '__main__':
     unittest.main()
