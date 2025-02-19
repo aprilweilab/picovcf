@@ -1929,7 +1929,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      bool emitIndividualIds = false,
                      bool emitVariantIds = false,
                      bool forceUnphased = false,
-                     const PloidyHandling handlePloidy = PH_STRICT) {
+                     const PloidyHandling handlePloidy = PH_STRICT,
+                     bool dropUnphased = false) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1941,7 +1942,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
     PICOVCF_ASSERT_OR_MALFORMED(firstIndividual.hasNext(), "VCF file has no genotype data");
     VariantT allele1 = 0;
     VariantT allele2 = 0;
-    const bool isPhased = forceUnphased || firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false);
+    const bool isPhased =
+        !forceUnphased && (dropUnphased || firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false));
     const uint64_t ploidy = (handlePloidy == PH_STRICT ? ((allele2 == NOT_DIPLOID) ? 1 : 2) : 2);
     PICOVCF_RELEASE_ASSERT(handlePloidy != PH_FORCE_DIPLOID || ploidy == 2);
 
@@ -1959,10 +1961,18 @@ inline void vcfToIGD(const std::string& vcfFilename,
         const size_t numSampleLists = isPhased ? altAlleles.size() : (altAlleles.size() * ploidy);
         std::vector<IGDSampleList> variantGtData(numSampleLists);
         SampleT sampleIndex = 0;
+        const auto position = variant.getPosition();
+        bool skipVariant = false;
         while (individualIt.hasNext()) {
             const bool isPhasedI = individualIt.getAlleles(allele1, allele2);
-            PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || isPhasedI == isPhased,
-                                        "Cannot convert VCF with mixed phasedness, unless forceUnphased is set");
+            PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || dropUnphased || isPhasedI == isPhased,
+                                        "Cannot convert VCF with mixed phasedness, unless forceUnphased or "
+                                        "dropUnphased is set, at variant position "
+                                            << position);
+            if (dropUnphased && !isPhasedI) {
+                skipVariant = true;
+                break;
+            }
             const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
             if (handlePloidy == PH_STRICT) {
                 PICOVCF_ASSERT_OR_MALFORMED(
@@ -2009,12 +2019,14 @@ inline void vcfToIGD(const std::string& vcfFilename,
                 sampleIndex++; // sampleIndex refers to _individuals_ for unphased data.
             }
         }
+        if (skipVariant) {
+            continue;
+        }
         std::string currentVariantId;
         if (emitVariantIds) {
             currentVariantId = variant.getID();
         }
         for (size_t altIndex = 0; altIndex < altAlleles.size(); altIndex++) {
-            const auto position = variant.getPosition();
             const auto& ref = variant.getRefAllele();
             const auto& alt = altAlleles[altIndex];
             const uint8_t numCopies = isPhased ? 0 : 1;

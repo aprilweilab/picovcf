@@ -73,6 +73,7 @@ int main(int argc, char* argv[]) {
         parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
     args::Flag dropMulti(
         parser, "dropMulti", "Drop multi-allelic sites (more than one alternate allele).", {"drop-multi"});
+    args::Flag dropUnphased(parser, "dropUnphased", "Drop sites containing unphased data.", {"drop-unphased"});
     args::ValueFlag<std::string> handlePloidy(
         parser,
         "handlePloidy",
@@ -131,10 +132,19 @@ int main(int argc, char* argv[]) {
         const bool emitVariantIds = !noVariantIds;
         const PloidyHandling hploidy =
             handlePloidy ? (*handlePloidy == "force-diploid" ? PH_FORCE_DIPLOID : PH_STRICT) : PH_STRICT;
-        vcfToIGD(*infile, *outfile, description, true, emitIndividualIds, emitVariantIds, forceUnphasedArg, hploidy);
+        vcfToIGD(*infile,
+                 *outfile,
+                 description,
+                 true,
+                 emitIndividualIds,
+                 emitVariantIds,
+                 forceUnphasedArg,
+                 hploidy,
+                 dropUnphased);
         return 0;
     } else {
         ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
+        ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
     }
 
     // Not a VCF, then assume it is IGD and load the header.
