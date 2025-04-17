@@ -73,6 +73,8 @@ int main(int argc, char* argv[]) {
         parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
     args::Flag dropMulti(
         parser, "dropMulti", "Drop multi-allelic sites (more than one alternate allele).", {"drop-multi"});
+    args::Flag dropNonSNVs(
+        parser, "dropNonSNVs", "Drop sites containing alleles that are not single nucleotides.", {"drop-non-snvs"});
     args::Flag dropUnphased(parser, "dropUnphased", "Drop sites containing unphased data.", {"drop-unphased"});
     args::ValueFlag<std::string> handlePloidy(
         parser,
@@ -126,7 +128,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         UNSUPPORTED_FOR_VCF(range, "--range");
-        UNSUPPORTED_FOR_VCF(dropMulti, "--dropMulti");
+        UNSUPPORTED_FOR_VCF(dropMulti, "--drop-multi");
+        UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
 
         const bool emitIndividualIds = !noIndividualIds;
         const bool emitVariantIds = !noVariantIds;
@@ -276,8 +279,9 @@ int main(int argc, char* argv[]) {
         std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
 
         std::vector<bool> skipVariant(igd.numVariants(), false);
-        size_t skipped = 0;
+        // Drop multi-allelic sites if requested.
         if (dropMulti) {
+            size_t skipped = 0;
             size_t lastIndex = 0;
             size_t lastPosition = std::numeric_limits<size_t>::max();
             for (size_t i = 0; i < igd.numVariants(); i++) {
@@ -299,6 +303,31 @@ int main(int argc, char* argv[]) {
                 lastIndex = i;
             }
             std::cerr << "Skipped " << skipped << " variants at multi-allelic sites" << std::endl;
+        }
+        // Drop non-SNV sites if requested.
+        if (dropNonSNVs) {
+            size_t skipped = 0;
+            size_t firstPosIndex = 0; // First index for the current position
+            size_t currentPosition = std::numeric_limits<size_t>::max();
+            for (size_t i = 0; i < igd.numVariants(); i++) {
+                uint8_t numCopies = 0;
+                bool isMissing = false;
+                const size_t pos = igd.getPosition(i, isMissing, numCopies);
+                if (currentPosition != pos) {
+                    currentPosition = pos;
+                    firstPosIndex = i;
+                }
+                const bool nonSNV = (igd.getRefAllele(i).size() >= 2) || (igd.getAltAllele(i).size() >= 2);
+                if (nonSNV) {
+                    for (size_t j = firstPosIndex; j <= i; j++) {
+                        if (!skipVariant[j]) {
+                            skipVariant[j] = true;
+                            skipped++;
+                        }
+                    }
+                }
+            }
+            std::cerr << "Skipped " << skipped << " variants at non-SNV sites" << std::endl;
         }
 
         auto vids = igd.getVariantIds();
