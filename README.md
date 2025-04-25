@@ -12,7 +12,7 @@ Features:
 * Convert VCF(.GZ) to Indexable Genotype Data (IGD) format, which is a very simple format that is **more than 3x smaller than VCF.GZ at Biobank scale** and **more than 15x faster to read**
 * Fast and easy to use IGD parsing.
 
-More details can be found in the supplement of our [preprint "Genotype Representation Graph" paper](https://www.biorxiv.org/content/10.1101/2024.04.23.590800v1).
+More details on IGD can be found in our [preprint IGD paper](https://www.biorxiv.org/content/10.1101/2025.02.05.636549v1.abstract).
 
 See also [pyigd](https://github.com/aprilweilab/pyigd/) if you want Python access to IGD files.
 

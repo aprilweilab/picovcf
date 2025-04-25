@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <unordered_set>
 
 #include "picovcf.hpp"
 #include "third-party/args.hxx"
@@ -71,8 +72,14 @@ int main(int argc, char* argv[]) {
     args::ValueFlag<size_t> trimSamples(parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
     args::Flag forceUnphasedArg(
         parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
-    args::Flag dropMulti(
-        parser, "dropMulti", "Drop multi-allelic sites (more than one alternate allele).", {"drop-multi"});
+    args::Flag dropMultiSites(
+        parser, "dropMultiSites", "Drop multi-allelic sites (more than one alternate allele).", {"drop-multi-sites"});
+    args::Flag dropNonSNVs(
+        parser, "dropNonSNVs", "Drop variants containing alleles that are not single nucleotides.", {"drop-non-snvs"});
+    args::Flag dropNonSNVSites(parser,
+                               "dropNonSNVSites",
+                               "Drop sites containing alleles that are not single nucleotides.",
+                               {"drop-non-snv-sites"});
     args::Flag dropUnphased(parser, "dropUnphased", "Drop sites containing unphased data.", {"drop-unphased"});
     args::ValueFlag<std::string> handlePloidy(
         parser,
@@ -126,7 +133,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         UNSUPPORTED_FOR_VCF(range, "--range");
-        UNSUPPORTED_FOR_VCF(dropMulti, "--dropMulti");
+        UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
+        UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
+        UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
 
         const bool emitIndividualIds = !noIndividualIds;
         const bool emitVariantIds = !noVariantIds;
@@ -276,41 +285,59 @@ int main(int argc, char* argv[]) {
         std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
 
         std::vector<bool> skipVariant(igd.numVariants(), false);
-        size_t skipped = 0;
-        if (dropMulti) {
-            size_t lastIndex = 0;
+        std::unordered_set<size_t> skipPosition;
+        size_t skippedVars = 0;
+        // Drop multi-allelic sites if requested.
+        if (dropMultiSites) {
             size_t lastPosition = std::numeric_limits<size_t>::max();
             for (size_t i = 0; i < igd.numVariants(); i++) {
                 uint8_t numCopies = 0;
                 bool isMissing = false;
                 auto pos = igd.getPosition(i, isMissing, numCopies);
+                // Ignore missing data rows, they aren't relevant to this calculation.
                 if (isMissing) {
-                    continue; // Ignore missing data rows, they aren't relevant to this calculation.
+                    continue;
                 }
-                if (pos == lastPosition && !isMissing) {
-                    if (!skipVariant[lastIndex]) {
-                        skipVariant[lastIndex] = true;
-                        skipped++;
-                    }
-                    skipVariant[i] = true;
-                    skipped++;
+                if (pos == lastPosition) {
+                    skipPosition.emplace(pos);
                 }
                 lastPosition = pos;
-                lastIndex = i;
             }
-            std::cerr << "Skipped " << skipped << " variants at multi-allelic sites" << std::endl;
         }
+
+        // Drop non-SNV sites/variants if requested.
+        if (dropNonSNVSites || dropNonSNVs) {
+            for (size_t i = 0; i < igd.numVariants(); i++) {
+                uint8_t numCopies = 0;
+                bool isMissing = false;
+                const size_t pos = igd.getPosition(i, isMissing, numCopies);
+                const bool nonSNV = (igd.getRefAllele(i).size() >= 2) || (igd.getAltAllele(i).size() >= 2);
+                if (nonSNV) {
+                    // Entire site can be dropped, or just the variant, depending on user option chosen.
+                    if (dropNonSNVSites) {
+                        skipPosition.emplace(pos);
+                    }
+                    if (dropNonSNVs) {
+                        skipVariant[i] = true;
+                        skippedVars++;
+                    }
+                }
+            }
+        }
+        std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
+        std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
 
         auto vids = igd.getVariantIds();
         std::vector<std::string> newVariantIds;
         size_t lastPosition = std::numeric_limits<size_t>::max();
         for (size_t i = 0; i < igd.numVariants(); i++) {
-            if (skipVariant[i]) {
-                continue;
-            }
             uint8_t numCopies = 0;
             bool isMissing = false;
             auto pos = igd.getPosition(i, isMissing, numCopies);
+            auto skipIt = skipPosition.find(pos);
+            if (skipIt != skipPosition.end() || skipVariant[i]) {
+                continue;
+            }
             if (pos >= bpStart && pos <= bpEnd) {
                 auto sampleList = igd.getSamplesWithAlt(i);
                 if (trimSamples) {
@@ -335,7 +362,8 @@ int main(int argc, char* argv[]) {
                     if (!igd.isPhased()) {
                         std::cout << (uint64_t)numCopies << SEP;
                     }
-                    std::cout << ref << SEP << alt << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
+                    const std::string altOut = isMissing ? "." : alt;
+                    std::cout << ref << SEP << altOut << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
                 }
                 if (outfile) {
                     if (!forcingUnphased) {
