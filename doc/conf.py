@@ -16,6 +16,9 @@ finally:
     os.chdir(orig_dir)
 
 
+project = "picovcf"
+author = "Drew DeHaas"
+
 extensions = ["breathe"]
 
 html_theme = "sphinx_rtd_theme"

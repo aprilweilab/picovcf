@@ -13,12 +13,17 @@ There are two parts to the API:
 
 Example usage for both is given below.
 
+Additionally, there is a commandline tool for converting VCF to IGD, and processing IGD files, called ``igdtools``. These tools are built when you build
+picovcf, or you can also install them via ``pip install igdtools``.
+
 .. contents::
    :depth: 2
 
 .. toctree::
   :maxdepth: 2
 
+  igd_overview
+  igdtools
   vcf_api
   igd_api
 
