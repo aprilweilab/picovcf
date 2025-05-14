@@ -229,7 +229,6 @@ inline std::map<std::string, std::string> picovcf_parse_structured_meta(const st
             if (!inQuotes) {
                 PICOVCF_ASSERT_OR_MALFORMED(!key.empty(), "Malformed metadata key/value pair. Key is empty.");
                 std::string value = metaValue.substr(tokStart + stripEnds, i - tokStart - 2 * stripEnds);
-                std::cout << "KEY: " << key << ", VALUE: " << value << "\n";
                 tokStart = i + 1;
                 result.emplace(std::move(key), std::move(value));
                 key.clear();
@@ -241,7 +240,6 @@ inline std::map<std::string, std::string> picovcf_parse_structured_meta(const st
     PICOVCF_ASSERT_OR_MALFORMED(!inQuotes, "Unterminated quotation mark in metadata.");
     if (!key.empty()) {
         std::string value = metaValue.substr(tokStart + stripEnds, end - tokStart - 2 * stripEnds);
-        std::cout << "KEY: " << key << ", VALUE: " << value << "\n";
         result.emplace(std::move(key), std::move(value));
     }
     return std::move(result);
@@ -1573,6 +1571,33 @@ public:
             }
         }
         return std::move(result);
+    }
+
+    /**
+     * Return the first variant index with position that is greater than or equal to the given position.
+     * Will return numVariants() if the given position is greater than all positions in the IGD.
+     *
+     * @param[in] position The base-pair position to search for.
+     * @return The first variant index with position greater-than-or-equal-to the given position.
+     */
+    size_t lowerBoundPosition(const size_t position) {
+        ssize_t low = 0;
+        ssize_t high = numVariants() - 1;
+        ssize_t mid = high;
+        while (low <= high) {
+            mid = low + ((high - low) / 2);
+            PICOVCF_RELEASE_ASSERT(mid <= high);
+            const uint64_t mid_pos = getPosition(mid);
+            if (mid_pos < position) {
+                low = mid + 1;
+            } else if (mid_pos > position) {
+                high = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+        PICOVCF_RELEASE_ASSERT(low >= 0);
+        return static_cast<size_t>(low);
     }
 
 private:

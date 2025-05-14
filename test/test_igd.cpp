@@ -9,6 +9,7 @@ using namespace picovcf;
 extern const std::string getMISSING_DATA_EXAMPLE_FILE();
 extern const std::string getUNPHASED_DATA_EXAMPLE_FILE();
 extern const std::string getMIXED_DATA_EXAMPLE_FILE();
+extern const std::string getMSPRIME_EXAMPLE_FILE();
 
 TEST(IGD, MissingData) {
     std::string igdFileName = "missing_data.igd";
@@ -88,3 +89,24 @@ TEST(IGD, MixedPloidyData) {
         }
     }
 }
+
+TEST(IGD, LowerBound) {
+    std::string igdFileName = "lower_bound.igd";
+    vcfToIGD(getMSPRIME_EXAMPLE_FILE(), igdFileName);
+
+    IGDData igdFile(igdFileName);
+
+    ASSERT_EQ(igdFile.numVariants(), 4);
+    size_t variantIndex = igdFile.lowerBoundPosition(0);
+    ASSERT_EQ(variantIndex, 0);
+    variantIndex = igdFile.lowerBoundPosition(56554);
+    ASSERT_EQ(variantIndex, 2);
+    ASSERT_EQ(igdFile.getPosition(variantIndex), 56554);
+    variantIndex = igdFile.lowerBoundPosition(56553);
+    ASSERT_EQ(variantIndex, 2);
+    variantIndex = igdFile.lowerBoundPosition(56812);
+    ASSERT_EQ(variantIndex, 3);
+    variantIndex = igdFile.lowerBoundPosition(100000000);
+    ASSERT_EQ(variantIndex, igdFile.numVariants());
+}
+
