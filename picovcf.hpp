@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <ostream>
 #include <set>
@@ -186,6 +187,64 @@ inline std::string picovcf_getValue(const std::string& line, const size_t start)
         return line.substr(position + 1);
     }
     return {};
+}
+
+/**
+ * Parse a structured metadata value, like INFO=<key=value,key="value">
+ *
+ * @param[in] metaValue The string to parse, which is the value from a getMetaInfo() map.
+ * @return A map from key to value for the parsed string.
+ * @throw MalformedFile is thrown on parsing errors.
+ */
+inline std::map<std::string, std::string> picovcf_parse_structured_meta(const std::string& metaValue) {
+    PICOVCF_ASSERT_OR_MALFORMED(metaValue.size() >= 2, "Maformed structured metadata: " << metaValue);
+    PICOVCF_ASSERT_OR_MALFORMED(metaValue[0] == '<', "Maformed structured metadata: " << metaValue);
+    PICOVCF_ASSERT_OR_MALFORMED(metaValue[metaValue.size() - 1] == '>', "Maformed structured metadata: " << metaValue);
+
+    std::map<std::string, std::string> result;
+
+    // We stop parsing the current value when we see the following character.
+    const size_t end = metaValue.size() - 1;
+    bool inQuotes = false;
+    std::string key;
+    size_t tokStart = 1;
+    size_t stripEnds = 0; // How many characters to strip off the ends.
+    for (size_t i = 1; i < end; i++) {
+        switch (metaValue[i]) {
+        case '"':
+            if (inQuotes) {
+                stripEnds = 1;
+                inQuotes = false;
+            } else {
+                inQuotes = true;
+            }
+            break;
+        case '=':
+            if (!inQuotes) {
+                key = metaValue.substr(tokStart + stripEnds, i - tokStart - stripEnds);
+                tokStart = i + 1;
+            }
+            break;
+        case ',':
+            if (!inQuotes) {
+                PICOVCF_ASSERT_OR_MALFORMED(!key.empty(), "Malformed metadata key/value pair. Key is empty.");
+                std::string value = metaValue.substr(tokStart + stripEnds, i - tokStart - 2 * stripEnds);
+                std::cout << "KEY: " << key << ", VALUE: " << value << "\n";
+                tokStart = i + 1;
+                result.emplace(std::move(key), std::move(value));
+                key.clear();
+                stripEnds = 0;
+            }
+            break;
+        }
+    }
+    PICOVCF_ASSERT_OR_MALFORMED(!inQuotes, "Unterminated quotation mark in metadata.");
+    if (!key.empty()) {
+        std::string value = metaValue.substr(tokStart + stripEnds, end - tokStart - 2 * stripEnds);
+        std::cout << "KEY: " << key << ", VALUE: " << value << "\n";
+        result.emplace(std::move(key), std::move(value));
+    }
+    return std::move(result);
 }
 
 using FileOffset = std::pair<size_t, size_t>;
@@ -612,20 +671,17 @@ public:
      * chromosome, position, id, ref allele, and alt allele fields. Set to false
      * to get the additional fields.
      */
-    inline VCFVariantInfo parseToVariantInfo(bool basicInfoOnly = true) {
-        VCFVariantInfo result = {this->getChrom(),
-                                 this->getPosition(),
-                                 this->getID(),
-                                 this->getRefAllele(),
-                                 this->getAltAlleles(),
-                                 std::numeric_limits<double>::quiet_NaN()};
+    inline VCFVariantInfo parseToVariantInfo(bool basicInfoOnly = true) const {
+        static const double qNaN = std::numeric_limits<double>::quiet_NaN();
+        VCFVariantInfo result = {
+            this->getChrom(), this->getPosition(), this->getID(), this->getRefAllele(), this->getAltAlleles(), qNaN};
         if (!basicInfoOnly) {
             result.quality = this->getQuality();
             result.filter = this->getFilter();
             result.information = this->getInfo();
             result.format = this->getFormat();
         }
-        return result;
+        return std::move(result);
     }
 
     /**
@@ -687,7 +743,11 @@ public:
      * @returns The numeric value for the quality.
      */
     double getQuality() const {
+        static const double qNaN = std::numeric_limits<double>::quiet_NaN();
         std::string qualString = stringForPosition(POS_QUAL_END);
+        if (qualString == ".") {
+            return qNaN;
+        }
         char* endPtr = nullptr;
         double result = strtod(qualString.c_str(), &endPtr);
         if (endPtr != (qualString.c_str() + qualString.size())) {
@@ -900,16 +960,36 @@ public:
     std::vector<std::string>& getIndividualLabels() { return m_individualLabels; }
 
     /**
-     * Get a metadata value from the VCF header rows.
+     * Get all metadata values for a given key, from the VCF header rows.
      * @param[in] key The metadata key name.
      * @return the string associated with the given key, or empty string.
      */
-    std::string getMetaInfo(const char* const key) const {
-        const auto metaIt = m_metaInformation.find(key);
-        if (metaIt != m_metaInformation.end()) {
-            return metaIt->second;
+    std::vector<std::string> getAllMetaInfo(const char* const key) const {
+        std::vector<std::string> result;
+        const auto metaIt = m_metaInformation.equal_range(key);
+        for (auto it = metaIt.first; it != metaIt.second; it++) {
+            result.emplace_back(it->second);
         }
-        return {};
+        return std::move(result);
+    }
+
+    /**
+     * Get a single metadata value for a given key, from the VCF header rows.
+     * Fails if there is more than one value for the key.
+     *
+     * @param[in] key The metadata key name.
+     * @return the string associated with the given key, or empty string.
+     * @throw MalformedFile exception thrown if the key does
+     */
+    std::string getMetaInfo(const char* const key) const {
+        auto metaList = getAllMetaInfo(key);
+        if (metaList.empty()) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "No metadata for key " << key);
+        }
+        if (metaList.size() > 1) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "More than one metadata value for key " << key);
+        }
+        return std::move(metaList[0]);
     }
 
     /**
@@ -971,7 +1051,7 @@ private:
                     if (key.empty() || value.empty()) {
                         PICOVCF_THROW_ERROR(MalformedFile, "Invalid key/value pair at " << m_infile->tell().first);
                     }
-                    m_metaInformation.emplace(key, value);
+                    m_metaInformation.emplace(std::move(key), std::move(value));
                 } else {
                     std::vector<std::string> headerColumns;
                     picovcf_split(lineBuffer, '\t', headerColumns);
@@ -1033,7 +1113,7 @@ private:
     // Starting position (offset) in the file for the variants information
     FileOffset m_posVariants;
     // Metadata dictionary
-    std::unordered_map<std::string, std::string> m_metaInformation;
+    std::multimap<std::string, std::string> m_metaInformation;
     // Labels for individuals
     std::vector<std::string> m_individualLabels;
 

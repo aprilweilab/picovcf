@@ -160,3 +160,29 @@ TEST(Helper, IGDAllele) {
 
 }
 
+TEST(Helper, StructuredMetadata) {
+    std::map<std::string, std::string> result;
+    std::map<std::string, std::string> expected;
+    // Doesn't start/end with <...>
+    EXPECT_THROW(
+        result = picovcf_parse_structured_meta("no <> characters"),
+        MalformedFile);
+    // Unterminated quote
+    EXPECT_THROW(
+        result = picovcf_parse_structured_meta("<A=\"blah>"),
+        MalformedFile);
+
+    result = picovcf_parse_structured_meta("<>");
+    expected.clear();
+    EXPECT_EQ(result, expected);
+
+    result = picovcf_parse_structured_meta("<A=B,C=D>");
+    expected = {{"A", "B"}, {"C", "D"}};
+    EXPECT_EQ(result, expected);
+    result = picovcf_parse_structured_meta("<A=\"B\",C=\"D\">");
+    EXPECT_EQ(result, expected);
+
+    result = picovcf_parse_structured_meta("<A=\"this has = and , and > characters in a string\">");
+    expected = {{"A", "this has = and , and > characters in a string"}};
+    EXPECT_EQ(result, expected);
+}
