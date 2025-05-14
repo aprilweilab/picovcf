@@ -6,12 +6,37 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "picovcf.hpp"
 #include "third-party/args.hxx"
+#include "third-party/json.hpp"
 
 using namespace picovcf;
+
+// Supported metadata fields for conversion from VCF
+enum MetadataFields {
+    MDF_ALL = 0,
+    MDF_CHROM = 1,
+    MDF_QUAL = 2,
+    MDF_FILTER = 3,
+    MDF_INFO = 4,
+};
+
+// Supported meta-data fields for exporting. If you export "INFO" then you get all of INFO, there is no way
+// to reduce it (use bcftools or something if you want that.)
+static const std::string METADATA_FIELDS[] = {
+    "ALL",
+    "CHROM",
+    "QUAL",
+    "FILTER",
+    "INFO",
+};
+// I want to maintain support for C++11, and std::size is not available until C++17, so we use
+// a C-style array here.
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
+static_assert(ARRAY_SIZE(METADATA_FIELDS) == (size_t)MetadataFields::MDF_INFO + 1, "Enum/string mismatch");
 
 inline void emitAllele(VariantT alleleIndex, std::ostream& out) {
     if (alleleIndex == MISSING_VALUE) {
@@ -40,6 +65,180 @@ inline std::vector<std::string> split(const std::string& s, char delim) {
     std::vector<std::string> elems;
     split(s, delim, std::back_inserter(elems));
     return std::move(elems);
+}
+
+inline std::string upper(const std::string& s) {
+    std::string result = s;
+    for (size_t i = 0; i < s.size(); i++) {
+        result[i] = std::toupper(result[i]);
+    }
+    return std::move(result);
+}
+
+inline std::string lower(const std::string& s) {
+    std::string result = s;
+    for (size_t i = 0; i < s.size(); i++) {
+        result[i] = std::tolower(result[i]);
+    }
+    return std::move(result);
+}
+
+inline std::string removeExt(const std::string& pathname) {
+    size_t pos = pathname.find_last_of('.');
+    if (pos != std::string::npos) {
+        return std::move(pathname.substr(0, pos));
+    }
+    return pathname;
+}
+
+// Supported types for VCF structured metadata (i.e., INFO fields)
+enum VcfInfoType {
+    VCFIT_INTEGER = 0,
+    VCFIT_FLOAT = 1,
+    VCFIT_STRING = 2,
+};
+
+// Just holds information for writing metadata info to output files.
+struct MetadataWriteInfo {
+    const std::string outputFilePrefix;
+    std::unordered_map<std::string, std::ofstream> outStreams;
+    std::unordered_map<std::string, std::ofstream> infoOutStreams;
+    std::unordered_map<std::string, VcfInfoType> infoTypes;
+    std::vector<bool> outputField;
+
+    MetadataWriteInfo(const std::string& prefix, const std::string& metadataFieldList)
+        : outputFilePrefix(prefix) {
+
+        outputField.resize(ARRAY_SIZE(METADATA_FIELDS), false);
+
+        auto fields = split(metadataFieldList, ',');
+        for (const auto& f : fields) {
+            std::string fieldName = upper(f);
+            bool matched = false;
+            for (size_t i = 0; i < ARRAY_SIZE(METADATA_FIELDS); i++) {
+                if (METADATA_FIELDS[i] == fieldName) {
+                    outputField.at(i) = true;
+                    matched = true;
+                }
+            }
+            if (!matched) {
+                PICOVCF_THROW_ERROR(
+                    ApiMisuse,
+                    "Unexpected metadata field name: " << f << ". Expected one of: all, chrom, qual, filter, info");
+            }
+        }
+    }
+};
+
+// Write a variant-at-a-time metadata information.
+void writeNextVariant(const VCFFile& vcfFile, const VCFVariantView& variant, void* context) {
+    PICOVCF_RELEASE_ASSERT(context != nullptr);
+    MetadataWriteInfo* info = static_cast<MetadataWriteInfo*>(context);
+
+    VCFVariantInfo allInfo = variant.parseToVariantInfo(/*basicInfoOnly=*/false);
+
+    // One-time initialization
+    if (info->outStreams.empty() && info->infoOutStreams.empty()) {
+        auto infoSuffix = [&](const std::string& key) { return lower(METADATA_FIELDS[MDF_INFO]) + "." + key; };
+
+        auto makeOutfile = [&](const std::string& suffix) {
+            std::stringstream filename;
+            filename << info->outputFilePrefix << "." << suffix << ".txt";
+            std::ofstream outStream(filename.str());
+            if (!outStream) {
+                std::stringstream ssErr;
+                ssErr << "Cannot create output file " << filename.str();
+                throw std::runtime_error(ssErr.str());
+            }
+            return std::move(outStream);
+        };
+
+        if (info->outputField[MDF_ALL] || info->outputField[MDF_CHROM]) {
+            const auto key = METADATA_FIELDS[MDF_CHROM];
+            nlohmann::json metaInfo;
+            metaInfo["type"] = "CHROM";
+            info->outStreams.emplace(key, std::move(makeOutfile("chrom")));
+            info->outStreams.at(key) << "# " << metaInfo << std::endl;
+        }
+        if (info->outputField[MDF_ALL] || info->outputField[MDF_QUAL]) {
+            const auto key = METADATA_FIELDS[MDF_QUAL];
+            nlohmann::json metaInfo;
+            metaInfo["type"] = "QUAL";
+            info->outStreams.emplace(key, std::move(makeOutfile("qual")));
+            info->outStreams.at(key) << "# " << metaInfo << std::endl;
+        }
+        if (info->outputField[MDF_ALL] || info->outputField[MDF_FILTER]) {
+            const auto key = METADATA_FIELDS[MDF_FILTER];
+            nlohmann::json metaInfo;
+            metaInfo["type"] = "FILTER";
+            info->outStreams.emplace(METADATA_FIELDS[MDF_FILTER], std::move(makeOutfile("filter")));
+            info->outStreams.at(key) << "# " << metaInfo << std::endl;
+        }
+        if (info->outputField[MDF_ALL] || info->outputField[MDF_INFO]) {
+            auto metaStrings = vcfFile.getAllMetaInfo(METADATA_FIELDS[MDF_INFO].c_str());
+            for (auto s : metaStrings) {
+                nlohmann::json metaInfo = picovcf_parse_structured_meta(s);
+                metaInfo["type"] = "INFO";
+                const auto suffix = infoSuffix(metaInfo["ID"]);
+                const auto key = metaInfo["ID"];
+                info->infoOutStreams.emplace(key, std::move(makeOutfile(suffix)));
+                info->infoOutStreams.at(key) << "# " << metaInfo << std::endl;
+                PICOVCF_ASSERT_OR_MALFORMED(metaInfo.contains("Type"), "INFO field is missing a \"Type\" key/value");
+                VcfInfoType infoType = VCFIT_STRING;
+                if (metaInfo["Type"] == "Integer") {
+                    infoType = VCFIT_INTEGER;
+                } else if (metaInfo["Type"] == "Float") {
+                    infoType = VCFIT_FLOAT;
+                } else if (metaInfo["Type"] != "String") {
+                    PICOVCF_ASSERT_OR_MALFORMED(false, "Unknown metadata INFO type: " << metaInfo["Type"]);
+                }
+                info->infoTypes.emplace(key, infoType);
+            }
+        }
+    }
+
+    if (info->outputField[MDF_ALL] || info->outputField[MDF_CHROM]) {
+        info->outStreams.at(METADATA_FIELDS[MDF_CHROM]) << allInfo.chromosome << std::endl;
+    }
+    if (info->outputField[MDF_ALL] || info->outputField[MDF_QUAL]) {
+        info->outStreams.at(METADATA_FIELDS[MDF_QUAL]) << allInfo.quality << std::endl;
+    }
+    if (info->outputField[MDF_ALL] || info->outputField[MDF_FILTER]) {
+        info->outStreams.at(METADATA_FIELDS[MDF_FILTER]) << allInfo.filter << std::endl;
+    }
+    if (info->outputField[MDF_ALL] || info->outputField[MDF_INFO]) {
+        for (const auto& keyStream : info->infoOutStreams) {
+            auto infoIt = allInfo.information.find(keyStream.first);
+            if (infoIt != allInfo.information.end()) {
+                info->infoOutStreams.at(keyStream.first) << infoIt->second << std::endl;
+            } else {
+                switch (info->infoTypes.at(keyStream.first)) {
+                case VCFIT_INTEGER: info->infoOutStreams.at(keyStream.first) << "0" << std::endl; break;
+                case VCFIT_FLOAT: info->infoOutStreams.at(keyStream.first) << "NaN" << std::endl; break;
+                case VCFIT_STRING: info->infoOutStreams.at(keyStream.first) << "." << std::endl; break;
+                default: PICOVCF_RELEASE_ASSERT(false);
+                }
+            }
+        }
+    }
+}
+
+// Given a VCF file, just emit the metadata from it, don't convert it to IGD.
+void vcfExportMetadata(const std::string& vcfFilename,
+                       const std::string& outputFilePrefix,
+                       const std::string& metadataFieldList) {
+    VCFFile vcf(vcfFilename);
+
+    MetadataWriteInfo writeInfo(outputFilePrefix, metadataFieldList);
+
+    vcf.seekBeforeVariants();
+    while (vcf.hasNextVariant()) {
+        vcf.nextVariant();
+        const VCFVariantView& variant = vcf.currentVariant();
+        for (size_t i = 0; i < variant.getAltAlleles().size(); i++) {
+            writeNextVariant(vcf, variant, &writeInfo);
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -81,14 +280,27 @@ int main(int argc, char* argv[]) {
                                "Drop sites containing alleles that are not single nucleotides.",
                                {"drop-non-snv-sites"});
     args::Flag dropUnphased(parser, "dropUnphased", "Drop sites containing unphased data.", {"drop-unphased"});
-    args::ValueFlag<std::string> handlePloidy(
+    args::ValueFlag<std::string> exportMetadata(
+        parser,
+        "exportMetadata",
+        "Export the metadata from the given .vcf[.gz] file to the given filename. The output format is a "
+        "text file in the format that can be loaded via numpy.loadtxt(), where the first line is a comment "
+        "containing information about the metadata. This option takes a list of metadata to export, which "
+        "can be: all, chrom, qual, filter, info",
+        {'e', "--export-metadata"});
+    std::unordered_map<std::string, PloidyHandling> ploidyHandlingMap{
+        {"strict", PloidyHandling::PH_STRICT},
+        {"force-diploid", PloidyHandling::PH_FORCE_DIPLOID},
+    };
+    args::MapFlag<std::string, PloidyHandling> handlePloidy(
         parser,
         "handlePloidy",
         "IGD files have a single ploidy, how should VCF files that violate this be handled? "
         "Options:\n"
         "  \"strict\": Fail if mixed ploidy is encountered\n"
         "  \"force-diploid\": Force all samples to have diploid data, by mirroring haploid samples\n",
-        {'p', "handle-ploidy"});
+        {'p', "handle-ploidy"},
+        ploidyHandlingMap);
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -128,8 +340,23 @@ int main(int argc, char* argv[]) {
 
     const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
     if (isVcf) {
+
         if (!outfile) {
-            std::cerr << "VCF input is only supported for conversion to IGD. Use --out." << std::endl;
+            if (exportMetadata) {
+                std::string outputFilePrefix = *infile;
+                if (ends_with(outputFilePrefix, ".gz")) {
+                    outputFilePrefix = removeExt(outputFilePrefix);
+                }
+                if (ends_with(outputFilePrefix, ".vcf")) {
+                    outputFilePrefix = removeExt(outputFilePrefix);
+                }
+                outputFilePrefix = outputFilePrefix + ".meta";
+                std::cout << "Exporting metadata to file(s) beginning with prefix " << outputFilePrefix << std::endl;
+                vcfExportMetadata(*infile, outputFilePrefix, *exportMetadata);
+                return 0;
+            }
+            std::cerr << "VCF input is only supported for conversion to IGD, and/or to export meta-data. "
+                      << "Use --out to convert to IGD, and --export-metadata to export the metadata." << std::endl;
             return 1;
         }
         UNSUPPORTED_FOR_VCF(range, "--range");
@@ -139,8 +366,23 @@ int main(int argc, char* argv[]) {
 
         const bool emitIndividualIds = !noIndividualIds;
         const bool emitVariantIds = !noVariantIds;
-        const PloidyHandling hploidy =
-            handlePloidy ? (*handlePloidy == "force-diploid" ? PH_FORCE_DIPLOID : PH_STRICT) : PH_STRICT;
+        const PloidyHandling hploidy = handlePloidy ? *handlePloidy : PH_STRICT;
+
+        void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr;
+        void* callbackContext = nullptr;
+        std::unique_ptr<MetadataWriteInfo> writeInfo;
+        if (exportMetadata) {
+            std::string outputFilePrefix = *outfile;
+            if (ends_with(outputFilePrefix, ".igd")) {
+                outputFilePrefix = removeExt(outputFilePrefix);
+            }
+            outputFilePrefix = outputFilePrefix + ".meta";
+            std::cout << "Exporting metadata to file(s) beginning with prefix " << outputFilePrefix << std::endl;
+
+            writeInfo.reset(new MetadataWriteInfo(outputFilePrefix, *exportMetadata));
+            variantCallback = writeNextVariant;
+            callbackContext = writeInfo.get();
+        }
         vcfToIGD(*infile,
                  *outfile,
                  description,
@@ -149,11 +391,14 @@ int main(int argc, char* argv[]) {
                  emitVariantIds,
                  forceUnphasedArg,
                  hploidy,
-                 dropUnphased);
+                 dropUnphased,
+                 variantCallback,
+                 callbackContext);
         return 0;
     } else {
         ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
         ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
+        ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
     }
 
     // Not a VCF, then assume it is IGD and load the header.
