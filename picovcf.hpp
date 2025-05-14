@@ -1915,6 +1915,13 @@ private:
  * default).
  * @param[in] forceUnphased [Optional] When true, force the result to be unphased
  * even if the input is phased (or mixed phased-ness).
+ * @param[in] variantCallback [Optional] When non-null, invoke this callback on
+ * every variant (row) that is emitted to the IGD file. The arguments to the callback
+ * are (const VCFFile&, const VCFVariantView& variant, void* context), where the variant
+ * view and VCF file can be used to get metadata, and context is a user-provided pointer
+ * (see callbackContext).
+ * @param[in] callbackContext [Optional] Pointer to an object that will be passed to
+ * variantCallback.
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
@@ -1924,7 +1931,9 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      bool emitVariantIds = false,
                      bool forceUnphased = false,
                      const PloidyHandling handlePloidy = PH_STRICT,
-                     bool dropUnphased = false) {
+                     bool dropUnphased = false,
+                     void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr,
+                     void* callbackContext = nullptr) {
     VCFFile vcf(vcfFilename);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
@@ -1948,7 +1957,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
     vcf.seekBeforeVariants();
     while (vcf.hasNextVariant()) {
         vcf.nextVariant();
-        VCFVariantView& variant = vcf.currentVariant();
+        const VCFVariantView& variant = vcf.currentVariant();
         IndividualIteratorGT individualIt = variant.getIndividualIterator();
         auto altAlleles = variant.getAltAlleles();
         IGDSampleList missingData;
@@ -2024,6 +2033,11 @@ inline void vcfToIGD(const std::string& vcfFilename,
             const auto& ref = variant.getRefAllele();
             const auto& alt = altAlleles[altIndex];
             const uint8_t numCopies = isPhased ? 0 : 1;
+            // If provided, we call the callback for each "expanded" variant per the IGD format. This means
+            // that multi-allelic sites, missing data rows, etc., will get multiple calls.
+            if (variantCallback != nullptr) {
+                variantCallback(vcf, variant, callbackContext);
+            }
             writer.writeVariantSamples(outFile, position, ref, alt, variantGtData[altIndex], false, numCopies);
             if (!isPhased && ploidy > 1) {
                 const size_t copies2Index = altIndex + altAlleles.size();
@@ -2046,6 +2060,9 @@ inline void vcfToIGD(const std::string& vcfFilename,
             }
         }
         if (!missingData.empty()) {
+            if (variantCallback != nullptr) {
+                variantCallback(vcf, variant, callbackContext);
+            }
             writer.writeVariantSamples(outFile, variant.getPosition(), variant.getRefAllele(), "", missingData, true);
             if (emitVariantIds) {
                 variantIds.emplace_back(currentVariantId);
