@@ -28,7 +28,6 @@ set(PICOVCF_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/test/test_helpers.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_igd.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_main.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/test/test_rotate.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_valid_vcf.cpp
   )
 

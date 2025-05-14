@@ -591,34 +591,6 @@ struct VCFVariantInfo {
 };
 
 /**
- * A subset of the VCF that has been rotated to go from sample (haplotype index)
- * to variant/mutation, excluding samples that map to the reference allele.
- *
- * VCF is ordered by variant, making it easy to go from variant/mutation to a
- * list of individuals/samples affected. This datastructure captures the inverse
- * relationship: individuals/samples mapped to the variant/mutation.
- *
- * This data structure probably doesn't make much sense for diploid unphased
- * datasets, since it is rotating per-sample (however, the resulting data could
- * still be useful, if you iterate the samples in pairs and collect all
- * mutations from both samples per pair).
- */
-struct VCFRotatedWindow {
-    /** The variants associated with this window */
-    std::vector<VCFVariantInfo> parsedVariants;
-    /** The 0-based index of the first individual in the window */
-    size_t firstIndividual;
-    /** The map from individual (index 0 is firstIndividual) to sets
-     * of indexes into the parseVariants vector */
-    std::vector<std::set<MutationPair>> sampleToMutation;
-    /** The file position _after_ the last variant that was parsed - can be used
-     * as an "iterator" */
-    FileOffset posAfterLastVariant;
-    /** Is the data diploid */
-    bool isDiploid;
-};
-
-/**
  * A class that lazily interprets the data for a single variant.
  *
  * This does not "parse" the whole row associated with the variant, it locates
@@ -984,89 +956,6 @@ public:
      * @return A VCFVariantView that can be queried for variant information.
      */
     VCFVariantView& currentVariant() { return m_currentVariant; }
-
-    /**
-     * Get a VCFRotatedWindow for the given rectange defined by individualRange
-     * and genomeRange.
-     *
-     * The most efficient way to use this function is from left-to-right
-     * (individuals) first, and then top-to-bottom (variants). E.g. if you have a
-     * VCF laid out like this: xyzw XYZW Then ask for the windows in this order:
-     * x,y,z,w,X,Y,Z,W. This allows use of posAfterLastVariant for efficiency.
-     *
-     * Assumptions:
-     * 1. The VCF rows are ordered by genome position (ascending).
-     * 2. The genotype data is uniform in ploidy and phased-ness.
-     *
-     * @param[in] individualRange The range [start, end) of individual indexes to
-     * include. For example, [0, 10) will only include individuals 0-9.
-     * @param[in] genomeRange The range [start, end) of genome positions to
-     * include. For example, [100, 1000) will include any variants that have
-     * position 100-999.
-     */
-    void getRotatedWindow(RangePair individualRange,
-                          RangePair genomeRange,
-                          VCFRotatedWindow& result,
-                          FileOffset posAfterLastVariant = {0, 0}) {
-        const size_t totalIndividuals = this->numIndividuals();
-        if (individualRange.second <= individualRange.first || individualRange.first >= totalIndividuals) {
-            PICOVCF_THROW_ERROR(ApiMisuse, "Invalid individualRange argument");
-        }
-        if (genomeRange.second <= genomeRange.first) {
-            PICOVCF_THROW_ERROR(ApiMisuse, "Invalid genomeRange argument");
-        }
-        if (posAfterLastVariant != FileOffset(0, 0)) {
-            this->setFilePosition(posAfterLastVariant);
-        } else {
-            this->seekBeforeVariants();
-        }
-        auto prevFilePosition = this->getFilePosition();
-        const size_t numIndividuals =
-            std::min<size_t>(totalIndividuals, individualRange.second) - individualRange.first;
-        result.firstIndividual = individualRange.first;
-        result.sampleToMutation.clear();
-        result.parsedVariants.clear();
-        result.isDiploid = false;
-        while (this->hasNextVariant()) {
-            prevFilePosition = this->getFilePosition();
-            this->nextVariant();
-            VCFVariantView& variant = this->currentVariant();
-            const size_t currentVariantIndex = result.parsedVariants.size();
-            const double position = variant.getPosition();
-            if (position >= genomeRange.first && position < genomeRange.second) {
-                IndividualIteratorGT iterator = variant.getIndividualIterator();
-                // Scan for the start position.
-                for (size_t i = 0; i < individualRange.first && iterator.hasNext(); i++, iterator.next())
-                    ;
-
-                for (size_t i = 0; i < (individualRange.second - individualRange.first) && iterator.hasNext();
-                     i++, iterator.next()) {
-                    VariantT allele1 = 0, allele2 = 0;
-                    iterator.getAlleles(allele1, allele2, /*moveNext=*/false);
-                    if (result.sampleToMutation.empty()) {
-                        result.isDiploid = (allele2 != NOT_DIPLOID);
-                        result.sampleToMutation.resize(numIndividuals * (result.isDiploid ? 2 : 1));
-                    }
-                    const size_t multiplier = (result.isDiploid ? 2 : 1);
-                    if (isMutation(allele1)) {
-                        result.sampleToMutation.at(multiplier * i).emplace(currentVariantIndex, allele1);
-                    }
-                    // TODO should probably also check for consistent phasing.
-                    if ((allele2 != NOT_DIPLOID) != result.isDiploid) {
-                        PICOVCF_THROW_ERROR(ApiMisuse, "getRotatedWindow requires consistent ploidy");
-                    }
-                    if (isMutation(allele2)) {
-                        result.sampleToMutation.at((multiplier * i) + 1).emplace(currentVariantIndex, allele2);
-                    }
-                }
-                const VCFVariantInfo variantParsed = variant.parseToVariantInfo();
-                result.parsedVariants.push_back(std::move(variantParsed));
-            } else if (position >= genomeRange.second || !result.parsedVariants.empty()) {
-                break;
-            }
-        }
-        result.posAfterLastVariant = prevFilePosition;
-    }
 
 private:
     void parseHeader() {
