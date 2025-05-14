@@ -40,7 +40,7 @@ class CMakeExtension(Extension):
 
 class CMakeBuild(build_ext):
     def get_source_files(self):
-        return ["CMakeLists.txt", "picovcf.hpp", "igdtools.cpp", "third-party/args.hxx"]
+        return ["CMakeLists.txt", "picovcf.hpp", "igdtools.cpp", "third-party/args.hxx", "third-party/json.hpp"]
 
     def build_extensions(self):
         assert len(self.extensions) == 1

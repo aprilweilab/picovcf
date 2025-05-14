@@ -104,13 +104,14 @@ struct MetadataWriteInfo {
     std::unordered_map<std::string, std::ofstream> outStreams;
     std::unordered_map<std::string, std::ofstream> infoOutStreams;
     std::unordered_map<std::string, VcfInfoType> infoTypes;
-    std::vector<bool> outputField;
+    std::array<bool, ARRAY_SIZE(METADATA_FIELDS)> outputField;
 
     MetadataWriteInfo(const std::string& prefix, const std::string& metadataFieldList)
         : outputFilePrefix(prefix) {
 
-        outputField.resize(ARRAY_SIZE(METADATA_FIELDS), false);
-
+        for (size_t i = 0; i < outputField.size(); i++) {
+            outputField[i] = false;
+        }
         auto fields = split(metadataFieldList, ',');
         for (const auto& f : fields) {
             std::string fieldName = upper(f);
