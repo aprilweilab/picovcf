@@ -6,7 +6,8 @@ Docker image).
 
 ## Version numbering
 
-Version numbering follows picovcf's version, always.
+Version numbering follows picovcf's version, always. Bump the version in setup.py whenever
+a release is done on GitHub.
 
 ## Packaging for PyPi
 

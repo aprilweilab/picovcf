@@ -15,8 +15,8 @@ Exception Types
 .. doxygenclass:: picovcf::ApiMisuse
     :members:
 
-Classes for VCF Parsing
-~~~~~~~~~~~~~~~~~~~~~~~
+Classes and Methods for VCF Parsing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. doxygenclass:: picovcf::VCFFile
     :members:
@@ -27,6 +27,8 @@ Classes for VCF Parsing
 .. doxygenclass:: picovcf::IndividualIteratorGT
     :members:
 
+.. doxygenfunction:: picovcf::picovcf_parse_structured_meta
+
 Structs
 ~~~~~~~
 
@@ -34,6 +36,3 @@ Structs
     :members:
     :undoc-members:
 
-.. doxygenstruct:: picovcf::VCFRotatedWindow
-    :members:
-    :undoc-members:
