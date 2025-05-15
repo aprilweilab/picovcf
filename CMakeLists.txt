@@ -75,8 +75,12 @@ if(${BUILD_EXAMPLES})
     add_executable(gzcat examples/gzcat.cpp)
     target_link_libraries(gzcat ${LIBRARIES_TO_LINK})
   endif()
+  # igdroh example
   add_executable(igdroh examples/igdroh.cpp)
   target_link_libraries(igdroh ${LIBRARIES_TO_LINK})
+  # igd_with_meta example
+  add_executable(igd_with_meta examples/igd_with_meta.cpp)
+  target_link_libraries(igd_with_meta ${LIBRARIES_TO_LINK})
 endif()
 
 if(${BUILD_IGDTOOLS})

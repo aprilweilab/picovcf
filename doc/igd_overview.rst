@@ -57,3 +57,70 @@ version of that function returns ``numCopies`` in the third argument). For examp
 individuals are returned when ``numCopies=2`` and the heterozygous individuals are returns when ``numCopies=1``. When an
 individual is homozygous in the reference allele, they will not be in any sample list (homozygous for reference is the implicit
 case).  The :cpp:func:`picovcf::IGDData::getSamplesWithAlt` function is still used to retrieve the corresponding sample lists.
+
+Metadata
+--------
+
+The IGD file itself does not contain metadata (beyond variant and individual identifiers). However, ``igdtools`` supports
+exporting variant-based metadata to files that can be loaded with `numpy.loadtxt <https://numpy.org/doc/2.2/reference/generated/numpy.loadtxt.html>`_.
+Matrix-based metadata (i.e., for VCF this means FORMAT fields other than GT) is not supported: if you need per-variant-per-sample metadata, then there
+is probably no reason to use IGD (you need a non-sparse representation like VCF/BCF, since your metadata is non-sparse).
+
+There are two ways to export this metadata:
+
+1. During VCF->IGD conversion: ``igdtools in.vcf.gz -o out.igd -e all``
+
+2. Only export metadata from a VCF: ``igdtools in.vcf.gz -e all``
+
+The metadata is stored as a file per metadata item type. The supported fields are CHROM, QUAL, FILTER, and INFO. For INFO, each
+key gets its own file.  All metadata files are a single entry (line) per variant in the resulting IGD file (i.e., "expanded" variants).
+
+The first line of a metadata file is a comment that has information about the metadata. When loaded with ``numpy.loadtxt()``, the size of
+the array is exactly :cpp:func:`picovcf::IGDData::numVariants` in length, and if you index variant ``i`` in the IGD file you can get its metadata by
+looking at element ``i`` of the corresponding metadata array.
+
+When a metadata value is not provided for a particular variant, a default value is used based on the Type field in the VCF metadata:
+
+* Integer: ``0``
+* Float: ``NaN``
+* String: ``.``
+
+Below is some example C++ code for loading metadata files. See ``examples/igd_with_meta.cpp`` for the full runnable example.
+See the `pyigd documentation <https://pyigd.readthedocs.io/en/latest>`_ for a more succinct example using Python (``pyigd`` and ``numpy``).
+
+::
+
+  template <typename T>
+  T lineToValue(const std::string& line);
+
+  template <>
+  std::string lineToValue(const std::string& line) {
+      return line;
+  }
+
+  template <>
+  uint64_t lineToValue(const std::string& line) {
+      char* endPtr = nullptr;
+      auto result = static_cast<uint64_t>(std::strtoull(line.c_str(), &endPtr, 10));
+      if (endPtr == line.c_str()) {
+          throw std::runtime_error("Could not parse integer");
+      }
+      return result;
+
+  }
+
+  // Function that turns a metadata file into a vector of length numVariants()
+  template <typename T>
+  std::vector<T> readMeta(const std::string& filename) {
+      std::vector<T> result;
+      std::ifstream metaTextFile(filename);
+      std::string line;
+      while (std::getline(metaTextFile, line)) {
+          // Skip comments
+          if (!line.empty() && line[0] == '#') {
+              continue;
+          }
+          result.emplace_back(lineToValue<T>(line));
+      }
+      return std::move(result);
+  }
