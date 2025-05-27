@@ -496,7 +496,14 @@ int main(int argc, char* argv[]) {
 
         if (info) {
             std::cout << "Header information for " << *infile << std::endl;
-            std::cout << "  Variants: " << igd.numVariants() << std::endl;
+            if (igd.isPhased()) {
+                std::cout << "  Variants: " << igd.numVariants() << std::endl;
+            } else {
+                std::cout << "  Variant rows (includes multiple rows for different num_copies): " << igd.numVariants()
+                          << std::endl;
+                std::cout << "  Variants: between " << igd.numVariants() / igd.getPloidy() << " and "
+                          << igd.numVariants() << std::endl;
+            }
             std::cout << "  Individuals: " << igd.numIndividuals() << std::endl;
             std::cout << "  Ploidy: " << igd.getPloidy() << std::endl;
             std::cout << "  Phased?: " << (igd.isPhased() ? "true" : "false") << std::endl;
@@ -609,6 +616,9 @@ int main(int argc, char* argv[]) {
             std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
             std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
 
+            // Number of variants, counted by by num_copies
+            std::vector<size_t> variantsByCopy(igd.getPloidy() + 1, 0);
+
             auto vids = igd.getVariantIds();
             std::vector<std::string> newVariantIds;
             size_t lastPosition = std::numeric_limits<size_t>::max();
@@ -701,6 +711,7 @@ int main(int argc, char* argv[]) {
                         }
                         samplesPerVariant.push_back(sampleCt);
                         sampleRefsTotal += sampleCt;
+                        variantsByCopy.at(numCopies)++;
                     }
                 }
             }
@@ -736,6 +747,13 @@ int main(int argc, char* argv[]) {
                 std::cout << "  Variants with missing data: " << missingRows << std::endl;
                 std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
                 std::cout << "  Total unique sites: " << sites << std::endl;
+
+                if (!igd.isPhased()) {
+                    std::cout << "  Variants by num_copies:" << std::endl;
+                    for (size_t i = 0; i < variantsByCopy.size(); i++) {
+                        std::cout << "    num_copies=" << i << ", variants=" << variantsByCopy[i] << std::endl;
+                    }
+                }
             }
             if (outfile) {
                 writer->writeIndex(*igdOutfile);
