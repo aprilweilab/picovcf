@@ -1615,7 +1615,7 @@ private:
         m_source = readString(m_header.version, m_infile);
         m_description = readString(m_header.version, m_infile);
         m_beforeFirstVariant = m_infile.tellg();
-        PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants > m_beforeFirstVariant,
+        PICOVCF_ASSERT_OR_MALFORMED(m_header.filePosVariants >= m_beforeFirstVariant,
                                     "Invalid variant info position " << m_header.filePosVariants);
         PICOVCF_ASSERT_OR_MALFORMED(m_header.ploidy <= MAX_PLOIDY,
                                     "Invalid ploidy " << m_header.ploidy << " is greater than maximum of "
