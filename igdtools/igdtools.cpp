@@ -3,17 +3,22 @@
  * Run "igdtools --help" for usage.
  */
 #include <cmath>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
+#include <sys/stat.h>
+
 #include "picovcf.hpp"
 #include "third-party/args.hxx"
 #include "third-party/json.hpp"
 
 using namespace picovcf;
+
+const std::string DIR_SEP = "/";
 
 // Supported metadata fields for conversion from VCF
 enum MetadataFields {
@@ -91,6 +96,20 @@ inline std::string removeExt(const std::string& pathname) {
     return pathname;
 }
 
+void make_dir_or_throw(const std::string& directory) {
+    std::stringstream ssErr;
+    int rv = mkdir(directory.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+    if (rv == 0) {
+        return;
+    }
+    switch (errno) {
+    case EEXIST: ssErr << "Directory " << directory << " already exists; remove and try again"; break;
+    case EACCES: ssErr << "Access denied when creating directory " << directory; break;
+    default: ssErr << "Failed creating directory " << directory << ": " << strerror(errno);
+    }
+    throw std::runtime_error(ssErr.str());
+}
+
 // Supported types for VCF structured metadata (i.e., INFO fields)
 enum VcfInfoType {
     VCFIT_INTEGER = 0,
@@ -100,17 +119,21 @@ enum VcfInfoType {
 
 // Just holds information for writing metadata info to output files.
 struct MetadataWriteInfo {
-    const std::string outputFilePrefix;
+    const std::string metadataOutDirectory;
+    std::ofstream variantIdStream;
     std::unordered_map<std::string, std::ofstream> outStreams;
     std::unordered_map<std::string, std::ofstream> infoOutStreams;
     std::unordered_map<std::string, VcfInfoType> infoTypes;
-    std::vector<bool> outputField;
+    std::array<bool, ARRAY_SIZE(METADATA_FIELDS)> outputField;
 
     MetadataWriteInfo(const std::string& prefix, const std::string& metadataFieldList)
-        : outputFilePrefix(prefix) {
+        : metadataOutDirectory(prefix) {
 
-        outputField.resize(ARRAY_SIZE(METADATA_FIELDS), false);
+        make_dir_or_throw(metadataOutDirectory);
 
+        for (size_t i = 0; i < outputField.size(); i++) {
+            outputField[i] = false;
+        }
         auto fields = split(metadataFieldList, ',');
         for (const auto& f : fields) {
             std::string fieldName = upper(f);
@@ -139,11 +162,20 @@ void writeNextVariant(const VCFFile& vcfFile, const VCFVariantView& variant, voi
 
     // One-time initialization
     if (info->outStreams.empty() && info->infoOutStreams.empty()) {
+        // We always emit a file that contains the variant IDs, so that the metadata can be used
+        // even if the IGD file is filtered downstream.
+        std::stringstream variantFilename;
+        variantFilename << info->metadataOutDirectory << DIR_SEP << "variants.txt";
+        info->variantIdStream = std::ofstream(variantFilename.str());
+        nlohmann::json metaInfo;
+        metaInfo["type"] = "ID";
+        info->variantIdStream << "# " << metaInfo << std::endl;
+
         auto infoSuffix = [&](const std::string& key) { return lower(METADATA_FIELDS[MDF_INFO]) + "." + key; };
 
         auto makeOutfile = [&](const std::string& suffix) {
             std::stringstream filename;
-            filename << info->outputFilePrefix << "." << suffix << ".txt";
+            filename << info->metadataOutDirectory << DIR_SEP << suffix << ".txt";
             std::ofstream outStream(filename.str());
             if (!outStream) {
                 std::stringstream ssErr;
@@ -197,6 +229,8 @@ void writeNextVariant(const VCFFile& vcfFile, const VCFVariantView& variant, voi
         }
     }
 
+    info->variantIdStream << variant.getID() << std::endl;
+
     if (info->outputField[MDF_ALL] || info->outputField[MDF_CHROM]) {
         info->outStreams.at(METADATA_FIELDS[MDF_CHROM]) << allInfo.chromosome << std::endl;
     }
@@ -225,11 +259,11 @@ void writeNextVariant(const VCFFile& vcfFile, const VCFVariantView& variant, voi
 
 // Given a VCF file, just emit the metadata from it, don't convert it to IGD.
 void vcfExportMetadata(const std::string& vcfFilename,
-                       const std::string& outputFilePrefix,
+                       const std::string& metadataOutDirectory,
                        const std::string& metadataFieldList) {
     VCFFile vcf(vcfFilename);
 
-    MetadataWriteInfo writeInfo(outputFilePrefix, metadataFieldList);
+    MetadataWriteInfo writeInfo(metadataOutDirectory, metadataFieldList);
 
     vcf.seekBeforeVariants();
     while (vcf.hasNextVariant()) {
@@ -338,155 +372,165 @@ int main(int argc, char* argv[]) {
 
     std::string description = outputDescription ? *outputDescription : "";
 
-    const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
-    if (isVcf) {
+    try {
 
-        if (!outfile) {
+        const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
+        if (isVcf) {
+
+            if (!outfile) {
+                if (exportMetadata) {
+                    std::string metadataOutDirectory = *infile;
+                    if (ends_with(metadataOutDirectory, ".gz")) {
+                        metadataOutDirectory = removeExt(metadataOutDirectory);
+                    }
+                    if (ends_with(metadataOutDirectory, ".vcf")) {
+                        metadataOutDirectory = removeExt(metadataOutDirectory);
+                    }
+                    metadataOutDirectory = metadataOutDirectory + ".meta";
+                    std::cout << "Exporting metadata to file(s) beginning with prefix " << metadataOutDirectory
+                              << std::endl;
+                    vcfExportMetadata(*infile, metadataOutDirectory, *exportMetadata);
+                    return 0;
+                }
+                std::cerr << "VCF input is only supported for conversion to IGD, and/or to export meta-data. "
+                          << "Use --out to convert to IGD, and --export-metadata to export the metadata." << std::endl;
+                return 1;
+            }
+            UNSUPPORTED_FOR_VCF(range, "--range");
+            UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
+            UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
+            UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
+
+            const bool emitIndividualIds = !noIndividualIds;
+            const bool emitVariantIds = !noVariantIds;
+            const PloidyHandling hploidy = handlePloidy ? *handlePloidy : PH_STRICT;
+
+            void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr;
+            void* callbackContext = nullptr;
+            std::unique_ptr<MetadataWriteInfo> writeInfo;
             if (exportMetadata) {
-                std::string outputFilePrefix = *infile;
-                if (ends_with(outputFilePrefix, ".gz")) {
-                    outputFilePrefix = removeExt(outputFilePrefix);
+                std::string metadataOutDirectory = *outfile;
+                if (ends_with(metadataOutDirectory, ".igd")) {
+                    metadataOutDirectory = removeExt(metadataOutDirectory);
                 }
-                if (ends_with(outputFilePrefix, ".vcf")) {
-                    outputFilePrefix = removeExt(outputFilePrefix);
-                }
-                outputFilePrefix = outputFilePrefix + ".meta";
-                std::cout << "Exporting metadata to file(s) beginning with prefix " << outputFilePrefix << std::endl;
-                vcfExportMetadata(*infile, outputFilePrefix, *exportMetadata);
-                return 0;
+                metadataOutDirectory = metadataOutDirectory + ".meta";
+                std::cout << "Exporting metadata to directory: " << metadataOutDirectory << std::endl;
+
+                writeInfo.reset(new MetadataWriteInfo(metadataOutDirectory, *exportMetadata));
+                variantCallback = writeNextVariant;
+                callbackContext = writeInfo.get();
             }
-            std::cerr << "VCF input is only supported for conversion to IGD, and/or to export meta-data. "
-                      << "Use --out to convert to IGD, and --export-metadata to export the metadata." << std::endl;
-            return 1;
+            vcfToIGD(*infile,
+                     *outfile,
+                     description,
+                     true,
+                     emitIndividualIds,
+                     emitVariantIds,
+                     forceUnphasedArg,
+                     hploidy,
+                     dropUnphased,
+                     variantCallback,
+                     callbackContext);
+            return 0;
+        } else {
+            ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
+            ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
+            ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
         }
-        UNSUPPORTED_FOR_VCF(range, "--range");
-        UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
-        UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
-        UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
 
-        const bool emitIndividualIds = !noIndividualIds;
-        const bool emitVariantIds = !noVariantIds;
-        const PloidyHandling hploidy = handlePloidy ? *handlePloidy : PH_STRICT;
+        // Not a VCF, then assume it is IGD and load the header.
+        IGDData igd(*infile);
 
-        void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr;
-        void* callbackContext = nullptr;
-        std::unique_ptr<MetadataWriteInfo> writeInfo;
-        if (exportMetadata) {
-            std::string outputFilePrefix = *outfile;
-            if (ends_with(outputFilePrefix, ".igd")) {
-                outputFilePrefix = removeExt(outputFilePrefix);
+        size_t bpStart = 0;
+        size_t bpEnd = std::numeric_limits<size_t>::max();
+        if (range) {
+            const char* rangec = range->c_str();
+            const char* rangecEnd = range->c_str() + range->size();
+            char* endptr = nullptr;
+            bpStart = std::strtoull(rangec, &endptr, 10);
+            if (endptr >= rangecEnd || *endptr != '-') {
+                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
+                return 1;
             }
-            outputFilePrefix = outputFilePrefix + ".meta";
-            std::cout << "Exporting metadata to file(s) beginning with prefix " << outputFilePrefix << std::endl;
+            endptr++;
+            bpEnd = std::strtoull(endptr, &endptr, 10);
+            if (endptr != rangecEnd) {
+                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
+                return 1;
+            }
+            std::cout << "Restricting to base-pair range " << bpStart << " - " << bpEnd << " (inclusive)" << std::endl;
+        }
 
-            writeInfo.reset(new MetadataWriteInfo(outputFilePrefix, *exportMetadata));
-            variantCallback = writeNextVariant;
-            callbackContext = writeInfo.get();
+        double fLower = 0.0;
+        double fUpper = 1.1;
+        if (frange) {
+            const char* frangec = frange->c_str();
+            const char* frangecEnd = frange->c_str() + frange->size();
+            char* endptr = nullptr;
+            fLower = std::strtod(frangec, &endptr);
+            if (endptr >= frangecEnd || *endptr != '-') {
+                std::cerr << "Malformed frange: " << *frange << " (must be \"lower-upper\")" << std::endl;
+                return 1;
+            }
+            endptr++;
+            fUpper = std::strtod(endptr, &endptr);
+            if (endptr != frangecEnd) {
+                std::cerr << "Malformed frange: " << *frange << " (must be \"lower-upper\")" << std::endl;
+                return 1;
+            }
+            std::cout << "Restricting to allele frequencies between [" << fLower << ", " << fUpper << ")" << std::endl;
         }
-        vcfToIGD(*infile,
-                 *outfile,
-                 description,
-                 true,
-                 emitIndividualIds,
-                 emitVariantIds,
-                 forceUnphasedArg,
-                 hploidy,
-                 dropUnphased,
-                 variantCallback,
-                 callbackContext);
-        return 0;
-    } else {
-        ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
-        ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
-        ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
-    }
 
-    // Not a VCF, then assume it is IGD and load the header.
-    IGDData igd(*infile);
+        const uint64_t ploidy = igd.getPloidy();
+        const size_t numSamples = igd.numSamples();
+        size_t effectiveSampleCt = numSamples;
+        if (trimSamples) {
+            effectiveSampleCt = igd.isPhased() ? (ploidy * (*trimSamples)) : (*trimSamples);
+            if (effectiveSampleCt > numSamples) {
+                std::cerr << "--trim value is larger than the number of individuals" << std::endl;
+                return 2;
+            }
+            std::cout << "Trimming to " << effectiveSampleCt << (igd.isPhased() ? " haploid" : "") << " samples"
+                      << std::endl;
+        }
 
-    size_t bpStart = 0;
-    size_t bpEnd = std::numeric_limits<size_t>::max();
-    if (range) {
-        const char* rangec = range->c_str();
-        const char* rangecEnd = range->c_str() + range->size();
-        char* endptr = nullptr;
-        bpStart = std::strtoull(rangec, &endptr, 10);
-        if (endptr >= rangecEnd || *endptr != '-') {
-            std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
-            return 1;
+        if (info) {
+            std::cout << "Header information for " << *infile << std::endl;
+            if (igd.isPhased()) {
+                std::cout << "  Variants: " << igd.numVariants() << std::endl;
+            } else {
+                std::cout << "  Variant rows (includes multiple rows for different num_copies): " << igd.numVariants()
+                          << std::endl;
+                std::cout << "  Variants: between " << igd.numVariants() / igd.getPloidy() << " and "
+                          << igd.numVariants() << std::endl;
+            }
+            std::cout << "  Individuals: " << igd.numIndividuals() << std::endl;
+            std::cout << "  Ploidy: " << igd.getPloidy() << std::endl;
+            std::cout << "  Phased?: " << (igd.isPhased() ? "true" : "false") << std::endl;
+            std::cout << "  Source: " << igd.getSource() << std::endl;
+            std::cout << "  Genome range: " << igd.getPosition(0) << "-" << igd.getPosition(igd.numVariants() - 1)
+                      << std::endl;
+            std::cout << "  Has individual IDs? " << (igd.getIndividualIds().empty() ? "No" : "Yes") << std::endl;
+            std::cout << "  Has variant IDs? " << (igd.getVariantIds().empty() ? "No" : "Yes") << std::endl;
         }
-        endptr++;
-        bpEnd = std::strtoull(endptr, &endptr, 10);
-        if (endptr != rangecEnd) {
-            std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
-            return 1;
+        if (individuals) {
+            std::vector<std::string> individualIds = igd.getIndividualIds();
+            if (individualIds.empty()) {
+                std::cout << "No individual IDs in this IGD file" << std::endl;
+            }
+            for (size_t i = 0; i < individualIds.size(); i++) {
+                std::cout << i << ": " << individualIds[i] << std::endl;
+            }
         }
-        std::cout << "Restricting to base-pair range " << bpStart << " - " << bpEnd << " (inclusive)" << std::endl;
-    }
-
-    double fLower = 0.0;
-    double fUpper = 1.1;
-    if (frange) {
-        const char* frangec = frange->c_str();
-        const char* frangecEnd = frange->c_str() + frange->size();
-        char* endptr = nullptr;
-        fLower = std::strtod(frangec, &endptr);
-        if (endptr >= frangecEnd || *endptr != '-') {
-            std::cerr << "Malformed frange: " << *frange << " (must be \"lower-upper\")" << std::endl;
-            return 1;
+        if (variants) {
+            std::vector<std::string> variantIds = igd.getVariantIds();
+            if (variantIds.empty()) {
+                std::cout << "No variant IDs in this IGD file" << std::endl;
+            }
+            for (size_t i = 0; i < variantIds.size(); i++) {
+                std::cout << i << ": " << variantIds[i] << std::endl;
+            }
         }
-        endptr++;
-        fUpper = std::strtod(endptr, &endptr);
-        if (endptr != frangecEnd) {
-            std::cerr << "Malformed frange: " << *frange << " (must be \"lower-upper\")" << std::endl;
-            return 1;
-        }
-        std::cout << "Restricting to allele frequencies between [" << fLower << ", " << fUpper << ")" << std::endl;
-    }
-
-    const uint64_t ploidy = igd.getPloidy();
-    const size_t numSamples = igd.numSamples();
-    size_t effectiveSampleCt = numSamples;
-    if (trimSamples) {
-        effectiveSampleCt = igd.isPhased() ? (ploidy * (*trimSamples)) : (*trimSamples);
-        if (effectiveSampleCt > numSamples) {
-            std::cerr << "--trim value is larger than the number of individuals" << std::endl;
-            return 2;
-        }
-        std::cout << "Trimming to " << effectiveSampleCt << (igd.isPhased() ? " haploid" : "") << " samples"
-                  << std::endl;
-    }
-
-    if (info) {
-        std::cout << "Header information for " << *infile << std::endl;
-        std::cout << "  Variants: " << igd.numVariants() << std::endl;
-        std::cout << "  Individuals: " << igd.numIndividuals() << std::endl;
-        std::cout << "  Ploidy: " << igd.getPloidy() << std::endl;
-        std::cout << "  Phased?: " << (igd.isPhased() ? "true" : "false") << std::endl;
-        std::cout << "  Source: " << igd.getSource() << std::endl;
-        std::cout << "  Genome range: " << igd.getPosition(0) << "-" << igd.getPosition(igd.numVariants() - 1)
-                  << std::endl;
-        std::cout << "  Has individual IDs? " << (igd.getIndividualIds().empty() ? "No" : "Yes") << std::endl;
-        std::cout << "  Has variant IDs? " << (igd.getVariantIds().empty() ? "No" : "Yes") << std::endl;
-    }
-    if (individuals) {
-        std::vector<std::string> individualIds = igd.getIndividualIds();
-        if (individualIds.empty()) {
-            std::cout << "No individual IDs in this IGD file" << std::endl;
-        }
-        for (size_t i = 0; i < individualIds.size(); i++) {
-            std::cout << i << ": " << individualIds[i] << std::endl;
-        }
-    }
-    if (variants) {
-        std::vector<std::string> variantIds = igd.getVariantIds();
-        if (variantIds.empty()) {
-            std::cout << "No variant IDs in this IGD file" << std::endl;
-        }
-        for (size_t i = 0; i < variantIds.size(); i++) {
-            std::cout << i << ": " << variantIds[i] << std::endl;
-        }
-    }
 
 #define CONDITION_PRINT(condition, message)                                                                            \
     do {                                                                                                               \
@@ -495,227 +539,243 @@ int main(int argc, char* argv[]) {
         }                                                                                                              \
     } while (0)
 
-    const bool forcingUnphased = forceUnphasedArg && igd.isPhased();
-    if (forcingUnphased && ploidy > std::numeric_limits<uint8_t>::max()) {
-        std::cerr << "Cannot store data with ploidy " << ploidy << " as unphased" << std::endl;
-        return 2;
-    }
-    std::shared_ptr<std::ofstream> igdOutfile;
-    std::shared_ptr<IGDWriter> writer;
-    const uint64_t numIndividuals = igd.isPhased() ? (effectiveSampleCt / ploidy) : effectiveSampleCt;
-    if (outfile) {
-        igdOutfile = std::make_shared<std::ofstream>(*outfile, std::ios::binary);
-        writer = std::make_shared<IGDWriter>(ploidy, numIndividuals, !forcingUnphased && igd.isPhased());
-        writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
-    }
-
-    const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile;
-    if (iterateSamples) {
-        static constexpr char SEP = '\t';
-        std::stringstream copySS;
-        if (!igd.isPhased()) {
-            copySS << "COPIES" << SEP;
+        const bool forcingUnphased = forceUnphasedArg && igd.isPhased();
+        if (forcingUnphased && ploidy > std::numeric_limits<uint8_t>::max()) {
+            std::cerr << "Cannot store data with ploidy " << ploidy << " as unphased" << std::endl;
+            return 2;
         }
-        CONDITION_PRINT(alleles,
-                        "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP
-                                   << "TOTAL" << std::endl);
+        std::shared_ptr<std::ofstream> igdOutfile;
+        std::shared_ptr<IGDWriter> writer;
+        const uint64_t numIndividuals = igd.isPhased() ? (effectiveSampleCt / ploidy) : effectiveSampleCt;
+        if (outfile) {
+            igdOutfile = std::make_shared<std::ofstream>(*outfile, std::ios::binary);
+            writer = std::make_shared<IGDWriter>(ploidy, numIndividuals, !forcingUnphased && igd.isPhased());
+            writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
+        }
 
-        size_t sites = 0;
-        bool _ignore = false;
-        size_t variants = 0;
-        size_t missingRows = 0;
-        size_t missingAlleles = 0;
-        std::vector<size_t> samplesPerVariant;
-        size_t sampleRefsTotal = 0;
-        std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
+        const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile;
+        if (iterateSamples) {
+            static constexpr char SEP = '\t';
+            std::stringstream copySS;
+            if (!igd.isPhased()) {
+                copySS << "COPIES" << SEP;
+            }
+            CONDITION_PRINT(alleles,
+                            "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP
+                                       << "TOTAL" << std::endl);
 
-        std::vector<bool> skipVariant(igd.numVariants(), false);
-        std::unordered_set<size_t> skipPosition;
-        size_t skippedVars = 0;
-        // Drop multi-allelic sites if requested.
-        if (dropMultiSites) {
+            size_t sites = 0;
+            bool _ignore = false;
+            size_t variants = 0;
+            size_t missingRows = 0;
+            size_t missingAlleles = 0;
+            std::vector<size_t> samplesPerVariant;
+            size_t sampleRefsTotal = 0;
+            std::vector<size_t> sampleToMuts(effectiveSampleCt); // Counts muts per sample
+
+            std::vector<bool> skipVariant(igd.numVariants(), false);
+            std::unordered_set<size_t> skipPosition;
+            size_t skippedVars = 0;
+            // Drop multi-allelic sites if requested.
+            if (dropMultiSites) {
+                size_t lastPosition = std::numeric_limits<size_t>::max();
+                for (size_t i = 0; i < igd.numVariants(); i++) {
+                    uint8_t numCopies = 0;
+                    bool isMissing = false;
+                    auto pos = igd.getPosition(i, isMissing, numCopies);
+                    // Ignore missing data rows, they aren't relevant to this calculation.
+                    if (isMissing) {
+                        continue;
+                    }
+                    if (pos == lastPosition) {
+                        skipPosition.emplace(pos);
+                    }
+                    lastPosition = pos;
+                }
+            }
+
+            // Drop non-SNV sites/variants if requested.
+            if (dropNonSNVSites || dropNonSNVs) {
+                for (size_t i = 0; i < igd.numVariants(); i++) {
+                    uint8_t numCopies = 0;
+                    bool isMissing = false;
+                    const size_t pos = igd.getPosition(i, isMissing, numCopies);
+                    const bool nonSNV = (igd.getRefAllele(i).size() >= 2) || (igd.getAltAllele(i).size() >= 2);
+                    if (nonSNV) {
+                        // Entire site can be dropped, or just the variant, depending on user option chosen.
+                        if (dropNonSNVSites) {
+                            skipPosition.emplace(pos);
+                        }
+                        if (dropNonSNVs) {
+                            skipVariant[i] = true;
+                            skippedVars++;
+                        }
+                    }
+                }
+            }
+            std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
+            std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
+
+            // Number of variants, counted by by num_copies
+            std::vector<size_t> variantsByCopy(igd.getPloidy() + 1, 0);
+
+            auto vids = igd.getVariantIds();
+            std::vector<std::string> newVariantIds;
             size_t lastPosition = std::numeric_limits<size_t>::max();
             for (size_t i = 0; i < igd.numVariants(); i++) {
                 uint8_t numCopies = 0;
                 bool isMissing = false;
                 auto pos = igd.getPosition(i, isMissing, numCopies);
-                // Ignore missing data rows, they aren't relevant to this calculation.
-                if (isMissing) {
+                auto skipIt = skipPosition.find(pos);
+                if (skipIt != skipPosition.end() || skipVariant[i]) {
                     continue;
                 }
-                if (pos == lastPosition) {
-                    skipPosition.emplace(pos);
-                }
-                lastPosition = pos;
-            }
-        }
-
-        // Drop non-SNV sites/variants if requested.
-        if (dropNonSNVSites || dropNonSNVs) {
-            for (size_t i = 0; i < igd.numVariants(); i++) {
-                uint8_t numCopies = 0;
-                bool isMissing = false;
-                const size_t pos = igd.getPosition(i, isMissing, numCopies);
-                const bool nonSNV = (igd.getRefAllele(i).size() >= 2) || (igd.getAltAllele(i).size() >= 2);
-                if (nonSNV) {
-                    // Entire site can be dropped, or just the variant, depending on user option chosen.
-                    if (dropNonSNVSites) {
-                        skipPosition.emplace(pos);
-                    }
-                    if (dropNonSNVs) {
-                        skipVariant[i] = true;
-                        skippedVars++;
-                    }
-                }
-            }
-        }
-        std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
-        std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
-
-        auto vids = igd.getVariantIds();
-        std::vector<std::string> newVariantIds;
-        size_t lastPosition = std::numeric_limits<size_t>::max();
-        for (size_t i = 0; i < igd.numVariants(); i++) {
-            uint8_t numCopies = 0;
-            bool isMissing = false;
-            auto pos = igd.getPosition(i, isMissing, numCopies);
-            auto skipIt = skipPosition.find(pos);
-            if (skipIt != skipPosition.end() || skipVariant[i]) {
-                continue;
-            }
-            if (pos >= bpStart && pos <= bpEnd) {
-                auto sampleList = igd.getSamplesWithAlt(i);
-                if (trimSamples) {
-                    size_t j = 0;
-                    while (j < sampleList.size() && sampleList[j] < effectiveSampleCt) {
-                        j++;
-                    }
-                    if (j != sampleList.size()) {
-                        sampleList.resize(j);
-                    }
-                }
-                const auto sampleCt = sampleList.size();
-                assert(sampleCt <= effectiveSampleCt);
-                const double freq = (double)sampleCt / (double)effectiveSampleCt;
-                if (freq < fLower || freq >= fUpper) {
-                    continue;
-                }
-                const auto& ref = igd.getRefAllele(i);
-                const auto& alt = igd.getAltAllele(i);
-                if (alleles) {
-                    std::cout << pos << SEP;
-                    if (!igd.isPhased()) {
-                        std::cout << (uint64_t)numCopies << SEP;
-                    }
-                    const std::string altOut = isMissing ? "." : alt;
-                    std::cout << ref << SEP << altOut << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
-                }
-                if (outfile) {
-                    if (!forcingUnphased) {
-                        writer->writeVariantSamples(*igdOutfile, pos, ref, alt, sampleList, isMissing, numCopies);
-                        if (!vids.empty() && !noVariantIds) {
-                            newVariantIds.emplace_back(vids.at(i));
+                if (pos >= bpStart && pos <= bpEnd) {
+                    auto sampleList = igd.getSamplesWithAlt(i);
+                    if (trimSamples) {
+                        size_t j = 0;
+                        while (j < sampleList.size() && sampleList[j] < effectiveSampleCt) {
+                            j++;
                         }
-                    } else {
-                        std::vector<IGDSampleList> samplesByCopies(ploidy);
-                        SampleT startSampleId = SAMPLE_INDEX_NOT_SET;
-                        size_t numCopies = 0;
-                        for (const auto& sampleId : sampleList) {
-                            if (sampleId >= (startSampleId + ploidy) || startSampleId == SAMPLE_INDEX_NOT_SET) {
-                                if (numCopies > 0) {
-                                    samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
-                                }
-                                numCopies = 1;
-                                startSampleId = (sampleId / ploidy) * ploidy; // Round down by ploidy
-                            } else {
-                                numCopies++;
+                        if (j != sampleList.size()) {
+                            sampleList.resize(j);
+                        }
+                    }
+                    const auto sampleCt = sampleList.size();
+                    assert(sampleCt <= effectiveSampleCt);
+                    const double freq = (double)sampleCt / (double)effectiveSampleCt;
+                    if (freq < fLower || freq >= fUpper) {
+                        continue;
+                    }
+                    const auto& ref = igd.getRefAllele(i);
+                    const auto& alt = igd.getAltAllele(i);
+                    if (alleles) {
+                        std::cout << pos << SEP;
+                        if (!igd.isPhased()) {
+                            std::cout << (uint64_t)numCopies << SEP;
+                        }
+                        const std::string altOut = isMissing ? "." : alt;
+                        std::cout << ref << SEP << altOut << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
+                    }
+                    if (outfile) {
+                        if (!forcingUnphased) {
+                            writer->writeVariantSamples(*igdOutfile, pos, ref, alt, sampleList, isMissing, numCopies);
+                            if (!vids.empty() && !noVariantIds) {
+                                newVariantIds.emplace_back(vids.at(i));
                             }
-                        }
-                        if (numCopies > 0) {
-                            samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
-                        }
-                        for (uint8_t nc = 1; nc <= ploidy; nc++) {
-                            const auto& copySampleList = samplesByCopies[nc - 1];
-                            if (!copySampleList.empty()) {
-                                writer->writeVariantSamples(*igdOutfile, pos, ref, alt, copySampleList, isMissing, nc);
-                                if (!vids.empty() && !noVariantIds) {
-                                    newVariantIds.emplace_back(vids.at(i));
-                                }
-                            }
-                        }
-                    }
-                }
-                if (stats) {
-                    variants++;
-                    if (pos != lastPosition) {
-                        sites++;
-                        lastPosition = pos;
-                    }
-                    if (isMissing) {
-                        missingRows++;
-                    }
-                    for (auto sampleId : sampleList) {
-                        if (!isMissing) {
-                            sampleToMuts.at(sampleId)++;
                         } else {
-                            missingAlleles++;
+                            std::vector<IGDSampleList> samplesByCopies(ploidy);
+                            SampleT startSampleId = SAMPLE_INDEX_NOT_SET;
+                            size_t numCopies = 0;
+                            for (const auto& sampleId : sampleList) {
+                                if (sampleId >= (startSampleId + ploidy) || startSampleId == SAMPLE_INDEX_NOT_SET) {
+                                    if (numCopies > 0) {
+                                        samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
+                                    }
+                                    numCopies = 1;
+                                    startSampleId = (sampleId / ploidy) * ploidy; // Round down by ploidy
+                                } else {
+                                    numCopies++;
+                                }
+                            }
+                            if (numCopies > 0) {
+                                samplesByCopies[numCopies - 1].emplace_back(startSampleId / ploidy);
+                            }
+                            for (uint8_t nc = 1; nc <= ploidy; nc++) {
+                                const auto& copySampleList = samplesByCopies[nc - 1];
+                                if (!copySampleList.empty()) {
+                                    writer->writeVariantSamples(
+                                        *igdOutfile, pos, ref, alt, copySampleList, isMissing, nc);
+                                    if (!vids.empty() && !noVariantIds) {
+                                        newVariantIds.emplace_back(vids.at(i));
+                                    }
+                                }
+                            }
                         }
                     }
-                    samplesPerVariant.push_back(sampleCt);
-                    sampleRefsTotal += sampleCt;
+                    if (stats) {
+                        variants++;
+                        if (pos != lastPosition) {
+                            sites++;
+                            lastPosition = pos;
+                        }
+                        if (isMissing) {
+                            missingRows++;
+                        }
+                        for (auto sampleId : sampleList) {
+                            if (!isMissing) {
+                                sampleToMuts.at(sampleId)++;
+                            } else {
+                                missingAlleles++;
+                            }
+                        }
+                        samplesPerVariant.push_back(sampleCt);
+                        sampleRefsTotal += sampleCt;
+                        variantsByCopy.at(numCopies)++;
+                    }
                 }
             }
-        }
 
-        if (stats) {
-            std::cout << "Stats for " << *infile << std::endl;
-            std::cout << "... in range " << bpStart << " - " << bpEnd << std::endl;
-            std::cout << "  Variants in range: " << variants << std::endl;
-            const double avgSamples = (double)sampleRefsTotal / (double)variants;
-            std::cout << "  Average samples/var: " << avgSamples << std::endl;
-            double stddevSamples = 0.0;
-            for (auto count : samplesPerVariant) {
-                double diff = (double)count - avgSamples;
-                stddevSamples += (diff * diff);
-            }
-            stddevSamples = sqrt(stddevSamples / (double)variants);
-            std::cout << "  Stddev samples/var: " << stddevSamples << std::endl;
-
-            size_t mutRefsTotal = 0;
-            for (size_t i = 0; i < sampleToMuts.size(); i++) {
-                mutRefsTotal += sampleToMuts[i];
-            }
-            const double avgMuts = (double)mutRefsTotal / (double)effectiveSampleCt;
-            std::cout << "  Average var/sample: " << avgMuts << std::endl;
-            double stddevMuts = 0.0;
-            for (size_t i = 0; i < sampleToMuts.size(); i++) {
-                double diff = (double)sampleToMuts[i] - avgMuts;
-                stddevMuts += (diff * diff);
-            }
-            stddevMuts = sqrt(stddevMuts / (double)effectiveSampleCt);
-            std::cout << "  Stddev var/sample: " << stddevMuts << std::endl;
-
-            std::cout << "  Variants with missing data: " << missingRows << std::endl;
-            std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
-            std::cout << "  Total unique sites: " << sites << std::endl;
-        }
-        if (outfile) {
-            writer->writeIndex(*igdOutfile);
-            writer->writeVariantInfo(*igdOutfile);
-            auto iids = igd.getIndividualIds();
-            if (!iids.empty() && !noIndividualIds) {
-                if (iids.size() < numIndividuals) {
-                    throw MalformedFile("Input file has invalid number of individual IDs");
+            if (stats) {
+                std::cout << "Stats for " << *infile << std::endl;
+                std::cout << "... in range " << bpStart << " - " << bpEnd << std::endl;
+                std::cout << "  Variants in range: " << variants << std::endl;
+                const double avgSamples = (double)sampleRefsTotal / (double)variants;
+                std::cout << "  Average samples/var: " << avgSamples << std::endl;
+                double stddevSamples = 0.0;
+                for (auto count : samplesPerVariant) {
+                    double diff = (double)count - avgSamples;
+                    stddevSamples += (diff * diff);
                 }
-                iids.resize(numIndividuals);
-                writer->writeIndividualIds(*igdOutfile, iids);
+                stddevSamples = sqrt(stddevSamples / (double)variants);
+                std::cout << "  Stddev samples/var: " << stddevSamples << std::endl;
+
+                size_t mutRefsTotal = 0;
+                for (size_t i = 0; i < sampleToMuts.size(); i++) {
+                    mutRefsTotal += sampleToMuts[i];
+                }
+                const double avgMuts = (double)mutRefsTotal / (double)effectiveSampleCt;
+                std::cout << "  Average var/sample: " << avgMuts << std::endl;
+                double stddevMuts = 0.0;
+                for (size_t i = 0; i < sampleToMuts.size(); i++) {
+                    double diff = (double)sampleToMuts[i] - avgMuts;
+                    stddevMuts += (diff * diff);
+                }
+                stddevMuts = sqrt(stddevMuts / (double)effectiveSampleCt);
+                std::cout << "  Stddev var/sample: " << stddevMuts << std::endl;
+
+                std::cout << "  Variants with missing data: " << missingRows << std::endl;
+                std::cout << "  Total missing alleles: " << missingAlleles << std::endl;
+                std::cout << "  Total unique sites: " << sites << std::endl;
+
+                if (!igd.isPhased()) {
+                    std::cout << "  Variants by num_copies:" << std::endl;
+                    for (size_t i = 0; i < variantsByCopy.size(); i++) {
+                        std::cout << "    num_copies=" << i << ", variants=" << variantsByCopy[i] << std::endl;
+                    }
+                }
             }
-            if (!newVariantIds.empty() && !noVariantIds) {
-                writer->writeVariantIds(*igdOutfile, newVariantIds);
+            if (outfile) {
+                writer->writeIndex(*igdOutfile);
+                writer->writeVariantInfo(*igdOutfile);
+                auto iids = igd.getIndividualIds();
+                if (!iids.empty() && !noIndividualIds) {
+                    if (iids.size() < numIndividuals) {
+                        throw MalformedFile("Input file has invalid number of individual IDs");
+                    }
+                    iids.resize(numIndividuals);
+                    writer->writeIndividualIds(*igdOutfile, iids);
+                }
+                if (!newVariantIds.empty() && !noVariantIds) {
+                    writer->writeVariantIds(*igdOutfile, newVariantIds);
+                }
+                igdOutfile->seekp(0);
+                writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
             }
-            igdOutfile->seekp(0);
-            writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
         }
+    } catch (std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return 1;
     }
 
     return 0;

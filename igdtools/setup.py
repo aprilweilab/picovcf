@@ -40,7 +40,7 @@ class CMakeExtension(Extension):
 
 class CMakeBuild(build_ext):
     def get_source_files(self):
-        return ["CMakeLists.txt", "picovcf.hpp", "igdtools.cpp", "third-party/args.hxx"]
+        return ["CMakeLists.txt", "picovcf.hpp", "igdtools.cpp", "third-party/args.hxx", "third-party/json.hpp"]
 
     def build_extensions(self):
         assert len(self.extensions) == 1
@@ -73,7 +73,7 @@ class CMakeBuild(build_ext):
 
 PACKAGE_NAME = "igdtools"
 BINARY_NAME = "igdtools"
-version = "2.1"
+version = "2.2"
 with open(os.path.join(THIS_DIR, "README.md")) as f:
     long_description = f.read()
 setup(
