@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -108,6 +109,21 @@ void make_dir_or_throw(const std::string& directory) {
     default: ssErr << "Failed creating directory " << directory << ": " << strerror(errno);
     }
     throw std::runtime_error(ssErr.str());
+}
+
+std::vector<std::string> readLines(const std::string& filename) {
+    std::ifstream inStream(filename);
+    if (!inStream.good()) {
+        std::stringstream ssErr;
+        ssErr << "Could not read file " << filename;
+        throw std::runtime_error(ssErr.str());
+    }
+    std::string line;
+    std::vector<std::string> result;
+    while (std::getline(inStream, line)) {
+        result.push_back(std::move(line));
+    }
+    return std::move(result);
 }
 
 // Supported types for VCF structured metadata (i.e., INFO fields)
@@ -335,6 +351,11 @@ int main(int argc, char* argv[]) {
         "  \"force-diploid\": Force all samples to have diploid data, by mirroring haploid samples\n",
         {'p', "handle-ploidy"},
         ploidyHandlingMap);
+    args::ValueFlag<std::string> updateIndividualIds(
+        parser,
+        "update-indiv-ids",
+        "Given a text file with an individual ID per line, set the IDs in the output IGD file to match them",
+        {"update-indiv-ids"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -758,13 +779,19 @@ int main(int argc, char* argv[]) {
             if (outfile) {
                 writer->writeIndex(*igdOutfile);
                 writer->writeVariantInfo(*igdOutfile);
-                auto iids = igd.getIndividualIds();
-                if (!iids.empty() && !noIndividualIds) {
-                    if (iids.size() < numIndividuals) {
+                std::vector<std::string> idsToUse;
+                if (updateIndividualIds) {
+                    idsToUse = readLines(*updateIndividualIds);
+                } else {
+                    idsToUse = igd.getIndividualIds();
+                }
+                if (!idsToUse.empty() && !noIndividualIds) {
+                    if (idsToUse.size() < numIndividuals) {
                         throw MalformedFile("Input file has invalid number of individual IDs");
                     }
-                    iids.resize(numIndividuals);
-                    writer->writeIndividualIds(*igdOutfile, iids);
+                    // Right now we only support truncation of samples (not random removal), so this is ok.
+                    idsToUse.resize(numIndividuals);
+                    writer->writeIndividualIds(*igdOutfile, idsToUse);
                 }
                 if (!newVariantIds.empty() && !noVariantIds) {
                     writer->writeVariantIds(*igdOutfile, newVariantIds);
