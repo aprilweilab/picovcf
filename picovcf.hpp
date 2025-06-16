@@ -616,7 +616,7 @@ private:
             return MISSING_VALUE;
         }
         char* endPtr = nullptr;
-        VariantT result = static_cast<uint32_t>(std::strtoull(str.c_str(), &endPtr, 10));
+        const VariantT result = static_cast<VariantT>(std::strtoull(str.c_str(), &endPtr, 10));
         if (endPtr != (str.c_str() + str.size())) {
             PICOVCF_THROW_ERROR(MalformedFile, "Invalid allele value: " << str);
         }
@@ -697,7 +697,7 @@ public:
         assert(posSize > 0);
         std::string posStr = m_currentLine.substr(m_nonGTPositions[POS_CHROM_END] + 1, posSize - 1);
         char* endPtr = nullptr;
-        auto result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
+        const auto result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
         if (endPtr != (posStr.c_str() + posStr.size())) {
             PICOVCF_THROW_ERROR(MalformedFile, "Invalid position (cannot parse): " << posStr);
         }
@@ -1523,7 +1523,7 @@ public:
             const SampleT numSamples = this->numSamples();
             const SampleT readAmount = picovcf_div_ceiling<SampleT, 8>(numSamples);
             PICOVCF_RELEASE_ASSERT(readAmount > 0);
-            std::unique_ptr<uint8_t> buffer(new uint8_t[readAmount]);
+            std::unique_ptr<uint8_t[]> buffer(new uint8_t[readAmount]);
             if (buffer) {
                 m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
                 PICOVCF_GOOD_OR_API_MISUSE(m_infile);
