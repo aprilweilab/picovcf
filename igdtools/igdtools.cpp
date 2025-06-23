@@ -314,6 +314,16 @@ int main(int argc, char* argv[]) {
                      "samples, sites, and variants.",
                      {'s', "stats"});
     args::Flag alleles(parser, "alleles", "Emit allele frequencies.", {'a', "alleles"});
+    args::ValueFlag<size_t> emitSFS(
+        parser,
+        "sfs",
+        "Emit site frequency spectrum using the given number of equally spaced allele frequency bins.",
+        {"sfs"});
+    args::ValueFlag<size_t> emitFSFS(
+        parser,
+        "fsfs",
+        "Emit folded site frequency spectrum using the given number of equally spaced allele frequency bins.",
+        {"fsfs"});
     args::Flag noIndividualIds(
         parser, "noIndividualIds", "Do not emit IDs for individuals in the resulting IGD file.", {"no-indiv-ids"});
     args::Flag noVariantIds(
@@ -421,6 +431,8 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
             UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
             UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
+            UNSUPPORTED_FOR_VCF(emitSFS, "--sfs");
+            UNSUPPORTED_FOR_VCF(emitFSFS, "--fsfs");
 
             const bool emitIndividualIds = !noIndividualIds;
             const bool emitVariantIds = !noVariantIds;
@@ -457,10 +469,21 @@ int main(int argc, char* argv[]) {
             ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
             ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
             ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
+            if (emitSFS && emitFSFS) {
+                std::cerr << "Only one of --sfs and -fsfs can be specified" << std::endl;
+                return 1;
+            }
         }
 
         // Not a VCF, then assume it is IGD and load the header.
         IGDData igd(*infile);
+
+        // One of the slightly annoying things about the unphased data representation is that you have to do
+        // site-by-site iteration to do things like allele frequencies.
+        if ((emitSFS || emitFSFS) && !igd.isPhased()) {
+            std::cerr << "Unphased files do not currently work with --sfs or -fsfs" << std::endl;
+            return 1;
+        }
 
         size_t bpStart = 0;
         size_t bpEnd = std::numeric_limits<size_t>::max();
@@ -574,7 +597,7 @@ int main(int argc, char* argv[]) {
             writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
         }
 
-        const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile;
+        const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile || (bool)emitSFS || (bool)emitFSFS;
         if (iterateSamples) {
             static constexpr char SEP = '\t';
             std::stringstream copySS;
@@ -585,6 +608,12 @@ int main(int argc, char* argv[]) {
                             "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP
                                        << "TOTAL" << std::endl);
 
+            std::vector<size_t> sfs;
+            if (emitSFS) {
+                sfs.resize(*emitSFS);
+            } else if (emitFSFS) {
+                sfs.resize(*emitFSFS);
+            }
             size_t sites = 0;
             bool _ignore = false;
             size_t variants = 0;
@@ -677,6 +706,26 @@ int main(int argc, char* argv[]) {
                         }
                         const std::string altOut = isMissing ? "." : alt;
                         std::cout << ref << SEP << altOut << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
+                    }
+                    if (emitSFS) {
+                        size_t bin = freq * sfs.size();
+                        if (bin >= sfs.size()) {
+                            PICOVCF_RELEASE_ASSERT(bin == sfs.size());
+                            bin--;
+                        }
+                        sfs[bin]++;
+                    } else if (emitFSFS) {
+                        size_t bin;
+                        if (freq > 0.5) {
+                            bin = (1.0 - freq) * sfs.size() * 2;
+                        } else {
+                            bin = freq * sfs.size() * 2;
+                        }
+                        if (bin >= sfs.size()) {
+                            PICOVCF_RELEASE_ASSERT(bin == sfs.size());
+                            bin--;
+                        }
+                        sfs[bin]++;
                     }
                     if (outfile) {
                         if (!forcingUnphased) {
@@ -798,6 +847,17 @@ int main(int argc, char* argv[]) {
                 }
                 igdOutfile->seekp(0);
                 writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
+            }
+
+            if (emitSFS || emitFSFS) {
+                std::cout << "FREQUENCY_BIN" << SEP << "ALLELE_COUNT" << std::endl;
+                for (size_t i = 0; i < sfs.size(); i++) {
+                    double freq = (double)(i + 1) / (double)sfs.size();
+                    if (emitFSFS) {
+                        freq /= 2.0;
+                    }
+                    std::cout << freq << SEP << sfs[i] << std::endl;
+                }
             }
         }
     } catch (std::exception& e) {
