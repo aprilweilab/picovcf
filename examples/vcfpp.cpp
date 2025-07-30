@@ -31,17 +31,27 @@ int main(int argc, char* argv[]) {
 
     VCFFile vcf(filename);
 
-    if (command == "stats") {
+    if (command == "test") {
+        if (vcf.lowerBoundPosition(20304045)) {
+            const VCFVariantView& variant = vcf.currentVariant();
+            std::cout << "Found variant: " << variant.getPosition() << "\n";
+        }
+    } else if (command == "index") {
+        std::stringstream ss;
+        ss << filename << ".tbi";
+        TabixIndex index(ss.str());
+        const auto& seq = index.getSequence("22");
+        seq.lookupByBin(21906505, 21906506);
+    } else if (command == "stats") {
         std::cout << "Stats for " << filename << std::endl;
+        std::cout << "  Has index? " << (vcf.isUsingIndex() ? "yes" : "no") << std::endl;
         std::cout << "  Variants: " << vcf.numVariants() << std::endl;
         std::cout << "  Individuals: " << vcf.numIndividuals() << std::endl;
         std::cout << "  Version: " << vcf.getMetaInfo(VCFFile::META_FILE_FORMAT) << std::endl;
         std::cout << "  Source: " << vcf.getMetaInfo("source") << std::endl;
         std::cout << "  Genome range: " << vcf.getGenomeRange().first << "-" << vcf.getGenomeRange().second
                   << std::endl;
-        vcf.seekBeforeVariants();
-        if (vcf.hasNextVariant()) {
-            vcf.nextVariant();
+        if (vcf.nextVariant()) {
             std::cout << "  Has genotype data? " << (vcf.currentVariant().hasGenotypeData() ? "yes" : "no")
                       << std::endl;
         }
@@ -50,22 +60,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Columns: samples" << std::endl;
         // This assumes/checks for phased data.
         vcf.seekBeforeVariants();
-        while (vcf.hasNextVariant()) {
-            vcf.nextVariant();
-            VCFVariantView variant = vcf.currentVariant();
-            IndividualIteratorGT iterator = variant.getIndividualIterator();
-            while (iterator.hasNext()) {
-                VariantT allele1 = 0;
-                VariantT allele2 = 0;
-                bool isPhased = iterator.getAlleles(allele1, allele2);
-                if (!isPhased) {
-                    std::cerr << "Cannot create a matrix for unphased data" << std::endl;
-                    return 2;
-                }
-                emitAllele(allele1, std::cout);
-                if (allele2 != NOT_DIPLOID) {
-                    emitAllele(allele2, std::cout);
-                }
+        while (vcf.nextVariant()) {
+            VCFVariantView& variant = vcf.currentVariant();
+            std::vector<AlleleT> gt = variant.getGenotypeArray();
+            for (const auto allele : gt) {
+                emitAllele(allele, std::cout);
             }
             std::cout << std::endl;
         }
