@@ -97,7 +97,7 @@ inline std::string removeExt(const std::string& pathname) {
     return pathname;
 }
 
-void make_dir_or_throw(const std::string& directory) {
+void makeDirOrThrow(const std::string& directory) {
     std::stringstream ssErr;
     int rv = mkdir(directory.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
     if (rv == 0) {
@@ -145,7 +145,7 @@ struct MetadataWriteInfo {
     MetadataWriteInfo(const std::string& prefix, const std::string& metadataFieldList)
         : metadataOutDirectory(prefix) {
 
-        make_dir_or_throw(metadataOutDirectory);
+        makeDirOrThrow(metadataOutDirectory);
 
         for (size_t i = 0; i < outputField.size(); i++) {
             outputField[i] = false;
@@ -170,7 +170,7 @@ struct MetadataWriteInfo {
 };
 
 // Write a variant-at-a-time metadata information.
-void writeNextVariant(const VCFFile& vcfFile, const VCFVariantView& variant, void* context) {
+void writeNextVariant(const VCFFile& vcfFile, VCFVariantView& variant, void* context) {
     PICOVCF_RELEASE_ASSERT(context != nullptr);
     MetadataWriteInfo* info = static_cast<MetadataWriteInfo*>(context);
 
@@ -282,9 +282,8 @@ void vcfExportMetadata(const std::string& vcfFilename,
     MetadataWriteInfo writeInfo(metadataOutDirectory, metadataFieldList);
 
     vcf.seekBeforeVariants();
-    while (vcf.hasNextVariant()) {
-        vcf.nextVariant();
-        const VCFVariantView& variant = vcf.currentVariant();
+    while (vcf.nextVariant()) {
+        VCFVariantView& variant = vcf.currentVariant();
         for (size_t i = 0; i < variant.getAltAlleles().size(); i++) {
             writeNextVariant(vcf, variant, &writeInfo);
         }
@@ -338,19 +337,11 @@ int main(int argc, char* argv[]) {
         "containing information about the metadata. This option takes a list of metadata to export, which "
         "can be: all, chrom, qual, filter, info",
         {'e', "--export-metadata"});
-    std::unordered_map<std::string, PloidyHandling> ploidyHandlingMap{
-        {"strict", PloidyHandling::PH_STRICT},
-        {"force-diploid", PloidyHandling::PH_FORCE_DIPLOID},
-    };
-    args::MapFlag<std::string, PloidyHandling> handlePloidy(
-        parser,
-        "handlePloidy",
-        "IGD files have a single ploidy, how should VCF files that violate this be handled? "
-        "Options:\n"
-        "  \"strict\": Fail if mixed ploidy is encountered\n"
-        "  \"force-diploid\": Force all samples to have diploid data, by mirroring haploid samples\n",
-        {'p', "handle-ploidy"},
-        ploidyHandlingMap);
+    args::ValueFlag<size_t> forceToPloidy(parser,
+                                          "forceToPloidy",
+                                          "IGD files have a single ploidy, but you can use this to force all "
+                                          "variants/individuals to have the same ploidy.",
+                                          {'p', "force-ploidy"});
     args::ValueFlag<std::string> updateIndividualIds(
         parser,
         "update-indiv-ids",
@@ -424,9 +415,8 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(keepSamples, "--samples");
 
             const bool emitVariantIds = !noVariantIds;
-            const PloidyHandling hploidy = handlePloidy ? *handlePloidy : PH_STRICT;
 
-            void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr;
+            void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr;
             void* callbackContext = nullptr;
             std::unique_ptr<MetadataWriteInfo> writeInfo;
             if (exportMetadata) {
@@ -448,13 +438,13 @@ int main(int argc, char* argv[]) {
                      /*emitIndividualIds=*/true,
                      emitVariantIds,
                      forceUnphasedArg,
-                     hploidy,
+                     forceToPloidy ? *forceToPloidy : 0,
                      dropUnphased,
                      variantCallback,
                      callbackContext);
             return 0;
         } else {
-            ONLY_SUPPORTED_FOR_VCF(handlePloidy, "--handle-ploidy");
+            ONLY_SUPPORTED_FOR_VCF(forceToPloidy, "--force-ploidy");
             ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
             ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
         }

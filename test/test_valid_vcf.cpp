@@ -26,21 +26,12 @@ TEST(ValidVCF, SpecExample) {
 
     vcf.seekBeforeVariants();
     for (size_t i = 0; i < EXPECT_VARIANTS; i++) {
-        ASSERT_TRUE(vcf.hasNextVariant());
-        vcf.nextVariant();
-        VCFVariantView variant = vcf.currentVariant();
-        IndividualIteratorGT iterator = variant.getIndividualIterator();
-        while (iterator.hasNext()) {
-            VariantT allele1 = 0;
-            VariantT allele2 = 0;
-            iterator.getAlleles(allele1, allele2);
-        }
+        ASSERT_TRUE(vcf.nextVariant());
     }
-    ASSERT_FALSE(vcf.hasNextVariant());
+    ASSERT_FALSE(vcf.nextVariant());
 
     vcf.seekBeforeVariants();
-    ASSERT_TRUE(vcf.hasNextVariant());
-    vcf.nextVariant();
+    ASSERT_TRUE(vcf.nextVariant());
     VCFVariantView& variant1 = vcf.currentVariant();
     ASSERT_EQ(variant1.getChrom(), "20");
     ASSERT_EQ(variant1.getPosition(), 14370);
@@ -48,44 +39,33 @@ TEST(ValidVCF, SpecExample) {
     ASSERT_EQ(variant1.getRefAllele(), "G");
     ASSERT_EQ(variant1.getAltAlleles(), std::vector<std::string>{"A"});
     ASSERT_TRUE(variant1.hasGenotypeData());
+    ASSERT_EQ(vcf.numIndividuals(), 3);
 
     // Check all individuals of the first variant
     VariantT allele1 = MISSING_VALUE;
     VariantT allele2 = MISSING_VALUE;
     bool isPhased;
-    IndividualIteratorGT iterator = variant1.getIndividualIterator();
-    // Do the first individual twice in a row.
-    ASSERT_TRUE(iterator.hasNext());
-    isPhased = iterator.getAlleles(allele1, allele2, /*moveNext=*/false);
-    ASSERT_TRUE(isPhased);
-    ASSERT_EQ(allele1, 0);
-    ASSERT_EQ(allele2, 0);
-    isPhased = iterator.getAlleles(allele1, allele2);
-    ASSERT_TRUE(isPhased);
-    ASSERT_EQ(allele1, 0);
-    ASSERT_EQ(allele2, 0);
-
-    ASSERT_TRUE(iterator.hasNext());
-    isPhased = iterator.getAlleles(allele1, allele2);
-    ASSERT_TRUE(isPhased);
-    ASSERT_EQ(allele1, 1);
-    ASSERT_EQ(allele2, 0);
-
-    ASSERT_TRUE(iterator.hasNext());
-    isPhased = iterator.getAlleles(allele1, allele2);
-    ASSERT_FALSE(isPhased);
-    ASSERT_EQ(allele1, 1);
-    ASSERT_EQ(allele2, 1);
-
-    ASSERT_FALSE(iterator.hasNext());
+    const auto& gtArray = variant1.getGenotypeArray();
+    const size_t ploidy = variant1.getMaxPloidy();
+    ASSERT_EQ(variant1.getPhasedness(), PVCFP_MIXED);
+    ASSERT_EQ(ploidy, 2);
+    // The first individual.
+    ASSERT_TRUE(variant1.getIsPhased().at(0));
+    ASSERT_EQ(gtArray.at(0), 0);
+    ASSERT_EQ(gtArray.at(1), 0);
+    // Second individual.
+    ASSERT_TRUE(variant1.getIsPhased().at(1));
+    ASSERT_EQ(gtArray.at(2), 1);
+    ASSERT_EQ(gtArray.at(3), 0);
+    // Third individual.
+    ASSERT_FALSE(variant1.getIsPhased().at(2));
+    ASSERT_EQ(gtArray.at(4), 1);
+    ASSERT_EQ(gtArray.at(5), 1);
 
     // Check a few things on the 4th variant
-    ASSERT_TRUE(vcf.hasNextVariant());
-    vcf.nextVariant();
-    ASSERT_TRUE(vcf.hasNextVariant());
-    vcf.nextVariant();
-    ASSERT_TRUE(vcf.hasNextVariant());
-    vcf.nextVariant();
+    ASSERT_TRUE(vcf.nextVariant());
+    ASSERT_TRUE(vcf.nextVariant());
+    ASSERT_TRUE(vcf.nextVariant());
     VCFVariantView& variant4 = vcf.currentVariant();
     ASSERT_EQ(variant4.getChrom(), "20");
     ASSERT_EQ(variant4.getPosition(), 1230237);
@@ -104,6 +84,7 @@ static bool hasSample(const IGDSampleList& samples, SampleT id) {
     return false;
 }
 
+// Equality between VCF and IGD on the same data.
 TEST(ValidVCF, Indexable) {
     constexpr size_t EXPECT_VARIANTS = 4;
     constexpr size_t EXPECT_INDIVIDUALS = 10000;
@@ -125,32 +106,23 @@ TEST(ValidVCF, Indexable) {
 
     size_t index = 0;
     vcf.seekBeforeVariants();
-    while (vcf.hasNextVariant()) {
-        vcf.nextVariant();
+    while (vcf.nextVariant()) {
         VCFVariantView& variant = vcf.currentVariant();
         ASSERT_FALSE(variant.getAltAlleles().size() > 1);
         bool isMissing = false;
         ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index, isMissing));
         auto sampleSet = indexableData.getSamplesWithAlt(index);
-        IndividualIteratorGT individualIt = variant.getIndividualIterator();
-        SampleT sampleIndex = 0;
-        while (individualIt.hasNext()) {
-            VariantT allele1 = 255;
-            VariantT allele2 = 255;
-            individualIt.getAlleles(allele1, allele2);
-            if (allele1 == 1) {
-                if (!hasSample(sampleSet, sampleIndex)) {
-                    std::cout << "Variant " << index << " failed: ";
-                    std::cout << "missing sample " << sampleIndex << "\n";
-                }
-                ASSERT_TRUE(hasSample(sampleSet, sampleIndex));
-            }
-            sampleIndex++;
-            if (allele2 != NOT_DIPLOID) {
-                if (allele2 == 1) {
+        const auto& gtArray = variant.getGenotypeArray();
+        const size_t ploidy = variant.getMaxPloidy();
+        ASSERT_LE(ploidy, 2);
+        for (size_t indiv = 0; indiv < vcf.numIndividuals(); indiv++) {
+            ASSERT_TRUE(variant.getIsPhased().at(indiv));
+            const size_t baseIndex = indiv*ploidy;
+            for (size_t j = 0; j < ploidy; j++) {
+                const SampleT sampleIndex = baseIndex + j;
+                if (gtArray.at(sampleIndex) > 0 && gtArray.at(sampleIndex) < MISSING_VALUE) {
                     ASSERT_TRUE(hasSample(sampleSet, sampleIndex));
                 }
-                sampleIndex++;
             }
         }
         index++;
@@ -166,19 +138,17 @@ TEST(ValidVCF, Haploid) {
 
     vcf.seekBeforeVariants();
     for (size_t i = 0; i < EXPECT_VARIANTS; i++) {
-        ASSERT_TRUE(vcf.hasNextVariant());
-        vcf.nextVariant();
+        ASSERT_TRUE(vcf.nextVariant());
         VCFVariantView variant = vcf.currentVariant();
-        IndividualIteratorGT iterator = variant.getIndividualIterator();
-        while (iterator.hasNext()) {
-            VariantT allele1 = 0;
-            VariantT allele2 = 0;
-            const bool isPhased = iterator.getAlleles(allele1, allele2);
-            ASSERT_TRUE(isPhased);
-            ASSERT_EQ(allele2, NOT_DIPLOID);
+        const auto& gtArray = variant.getGenotypeArray();
+        const size_t ploidy = variant.getMaxPloidy();
+        ASSERT_EQ(ploidy, 1);
+        ASSERT_EQ(variant.getPhasedness(), PVCFP_PHASED);
+        for (size_t indiv = 0; indiv < vcf.numIndividuals(); indiv++) {
+            ASSERT_TRUE(variant.getIsPhased().at(indiv));
         }
     }
-    ASSERT_FALSE(vcf.hasNextVariant());
+    ASSERT_FALSE(vcf.nextVariant());
 }
 
 TEST(ValidVCF, MixedPloidy) {
@@ -190,21 +160,24 @@ TEST(ValidVCF, MixedPloidy) {
 
     vcf.seekBeforeVariants();
     for (size_t i = 0; i < EXPECT_VARIANTS; i++) {
-        ASSERT_TRUE(vcf.hasNextVariant());
-        vcf.nextVariant();
+        ASSERT_TRUE(vcf.nextVariant());
         VCFVariantView variant = vcf.currentVariant();
-        IndividualIteratorGT iterator = variant.getIndividualIterator();
-        while (iterator.hasNext()) {
-            VariantT allele1 = 0;
-            VariantT allele2 = 0;
-            const bool isPhased = iterator.getAlleles(allele1, allele2);
-            ASSERT_TRUE(isPhased);
-            // The first 2 variants are entirely haploid.
-            if (i < 2) {
-                ASSERT_EQ(allele2, NOT_DIPLOID);
+        const auto& gtArray = variant.getGenotypeArray();
+        const size_t ploidy = variant.getMaxPloidy();
+        ASSERT_EQ((double)gtArray.size() / (double)ploidy, (double)vcf.numIndividuals());
+        if (i < 2) {
+            ASSERT_EQ(ploidy, 1);
+        } else {
+            ASSERT_EQ(ploidy, 2);
+        }
+        for (size_t indiv = 0; indiv < vcf.numIndividuals(); indiv++) {
+            ASSERT_TRUE(variant.getIsPhased().at(indiv));
+            const size_t baseIndex = indiv*ploidy;
+            ASSERT_NE(gtArray.at(baseIndex), NOT_DIPLOID);
+            if (i >= 2) {
+                ASSERT_NE(gtArray.at(baseIndex+1), NOT_DIPLOID);
             }
         }
     }
-    ASSERT_FALSE(vcf.hasNextVariant());
+    ASSERT_FALSE(vcf.nextVariant());
 }
-

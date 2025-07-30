@@ -63,7 +63,7 @@ TEST(IGD, UnphasedData) {
 
 TEST(IGD, MixedPloidyData) {
     std::string igdFileName = "mixed_ploidy.igd";
-    vcfToIGD(getMIXED_DATA_EXAMPLE_FILE(), igdFileName, "", false, true, true, false, PH_FORCE_DIPLOID);
+    vcfToIGD(getMIXED_DATA_EXAMPLE_FILE(), igdFileName, "", false, true, true, false, 2);
 
     IGDData igdFile(igdFileName);
 
