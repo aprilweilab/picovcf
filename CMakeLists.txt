@@ -3,10 +3,13 @@
 cmake_minimum_required(VERSION 3.10)
 project(picovcf)
 
+include(ExternalProject)
+
 option(ENABLE_VCF_GZ "Enable support for .vcf.gz (via ZLIB)" OFF)
 option(FUZZING_SUPPORT "Build for fuzzing; only abort on true failures, not invalid input data" OFF)
 option(BUILD_EXAMPLES "Build example tools" OFF)
 option(BUILD_IGDTOOLS "Build igdtools (for converting and processing IGD files)" ON)
+option(ENABLE_HTSLIB "Use htslib for VCF parsing" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
@@ -29,11 +32,25 @@ set(PICOVCF_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/test/test_igd.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_main.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_valid_vcf.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/test/test_variant_view.cpp
   )
+
+set(LIBRARIES_TO_LINK)
+if(${ENABLE_HTSLIB})
+  add_compile_options(-DPICOVCF_USE_HTSLIB=1)
+
+  # Download and build htslib, since we use picovcf as a wrapper around this library.
+  ExternalProject_Add(htslib
+      URL "https://github.com/samtools/htslib/releases/download/1.22.1/htslib-1.22.1.tar.bz2"
+      SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/htslib/
+      CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/htslib/configure --prefix=<INSTALL_DIR> --disable-libcurl --disable-lzma --disable-bz2
+      BUILD_COMMAND ${MAKE})
+  list(APPEND LIBRARIES_TO_LINK ${PROJECT_BINARY_DIR}/htslib-prefix/lib/libhts.a)
+endif()
 
 if (${ENABLE_VCF_GZ})
   add_compile_options(-DVCF_GZ_SUPPORT=1)
-  set(LIBRARIES_TO_LINK z)
+  list(APPEND LIBRARIES_TO_LINK z)
 else()
   set(LIBRARIES_TO_LINK)
 endif()

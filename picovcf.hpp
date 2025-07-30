@@ -24,9 +24,16 @@
 
 #include <fcntl.h>
 
+#if PICOVCF_USE_HTSLIB
+#include "htslib/htslib/bgzf.h"
+#include "htslib/htslib/tbx.h"
+#include "htslib/htslib/vcf.h"
+#endif
 #if VCF_GZ_SUPPORT
 #include <zlib.h>
 #endif
+
+#define PICOVCF_DEPRECATED __attribute__((deprecated))
 
 namespace picovcf {
 
@@ -41,6 +48,9 @@ static constexpr SampleT SAMPLE_INDEX_NOT_SET = std::numeric_limits<SampleT>::ma
 /** Represents the index of a variant. */
 using VariantT = uint64_t;
 
+/** Represents the index of an allele. */
+using AlleleT = uint32_t;
+
 /** Pair of integers that define a range */
 using RangePair = std::pair<VariantT, VariantT>;
 
@@ -51,15 +61,23 @@ using MutationPair = std::pair<VariantT, VariantT>;
 
 /** When processing pairs of alleles, this is used for the second item for
  * haploids */
-static constexpr VariantT NOT_DIPLOID = std::numeric_limits<VariantT>::max();
+static constexpr AlleleT NOT_DIPLOID = std::numeric_limits<AlleleT>::max();
+static constexpr AlleleT MIXED_PLOIDY = NOT_DIPLOID;
 
 /** Represents a missing allele value (e.g., "." in VCF nomenclature) */
-static constexpr VariantT MISSING_VALUE = std::numeric_limits<VariantT>::max() - 1;
+static constexpr AlleleT MISSING_VALUE = std::numeric_limits<AlleleT>::max() - 1;
 
 static constexpr size_t INTERNAL_VALUE_NOT_SET = std::numeric_limits<size_t>::max();
 
 /** IGD can only store up to ploidy = 8 */
 static constexpr size_t MAX_PLOIDY = 8;
+
+/** The maximum base-pair position supported. */
+#if PICOVCF_USE_HTSLIB
+static constexpr size_t MAX_SUPPORTED_POSITION = std::numeric_limits<hts_pos_t>::max() - 1;
+#else
+static constexpr size_t MAX_SUPPORTED_POSITION = std::numeric_limits<size_t>::max();
+#endif
 
 /**
  * Exception thrown when there is a problem reading the underlying file.
@@ -509,16 +527,13 @@ inline bool isMutation(VariantT alleleIndex) { return (alleleIndex != MISSING_VA
  */
 class IndividualIteratorGT {
 public:
-    /** The VCF diploid separator that indicates the data is phased */
-    static constexpr const char PHASED_SEPARATOR = '|';
-
     /**
      * Are there more individuals?
      *
      * @returns true If there is another individual -- if this returns false, then
      * you cannot call getAlleles() (it will throw an exception).
      */
-    bool hasNext() const { return m_currentPosition != std::string::npos; }
+    bool hasNext() const { return m_individualIndex < m_gtArray.size(); }
 
     /**
      * Get the allele values associated with the current individual, and (by
@@ -534,98 +549,47 @@ public:
      * haploid).
      */
     bool getAlleles(VariantT& allele1, VariantT& allele2, bool moveNext = true) {
-        if (m_currentPosition == std::string::npos) {
+        size_t index = (m_individualIndex * m_maxPloidy);
+        if (index >= m_gtArray.size()) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Iterator is at end of individuals");
         }
-        size_t stopAt = m_currentLine.find_first_of(":\t\r", m_currentPosition);
-        size_t length = 0;
-        if (stopAt == std::string::npos) {
-            length = m_currentLine.size() - m_currentPosition;
-        } else {
-            length = stopAt - m_currentPosition;
-        }
-        // These are the two fast paths (haploid + diploid)
-        bool isPhased = true;
-        if (length == 1) {
-            allele1 = singleCharToVariantT(m_currentLine[m_currentPosition]);
-            allele2 = NOT_DIPLOID;
-        } else if (length == 3) {
-            allele1 = singleCharToVariantT(m_currentLine[m_currentPosition]);
-            allele2 = singleCharToVariantT(m_currentLine[m_currentPosition + 2]);
-            ;
-            isPhased = m_currentLine[m_currentPosition + 1] == PHASED_SEPARATOR;
-        } else {
-            std::string alleles = m_currentLine.substr(m_currentPosition, length);
-            size_t splitPos = alleles.find_first_of("|/", 0);
-            PICOVCF_ASSERT_OR_MALFORMED(splitPos != std::string::npos,
-                                        "Invalid allele string: " << alleles << "\nAt line: " << m_currentLine);
-            char splitChar = alleles[splitPos];
-            std::vector<std::string> alleleStrings;
-            picovcf_split(alleles, splitChar, alleleStrings);
-            PICOVCF_ASSERT_OR_MALFORMED(alleleStrings.size() == 2,
-                                        "Invalid allele string: " << alleles << "\nAt line: " << m_currentLine);
-            allele1 = stringToVariantT(alleleStrings[0]);
-            allele2 = stringToVariantT(alleleStrings[1]);
-            isPhased = (splitChar == PHASED_SEPARATOR);
+        PICOVCF_RELEASE_ASSERT(m_maxPloidy >= 1);
+        allele1 = m_gtArray.at(index);
+        if (m_maxPloidy >= 2) {
+            allele2 = m_gtArray.at(index + 1);
         }
         if (moveNext) {
-            next();
+            m_individualIndex++;
         }
-        return isPhased;
+        return m_phased.at(m_individualIndex);
     }
 
     /**
      * Move this iterator to the next individual.
      */
     void next() {
-        if (m_currentPosition == std::string::npos) {
+        if (m_individualIndex >= m_gtArray.size()) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Iterator is at end of individuals");
         }
         m_individualIndex++;
-        m_currentPosition = m_currentLine.find_first_of('\t', m_currentPosition + 1);
-        if (m_currentPosition != std::string::npos) {
-            m_currentPosition++; // Move past separator.
-        }
     }
 
 private:
-    IndividualIteratorGT(const std::string& currentLine, const size_t currentPosition)
-        : m_currentLine(currentLine),
-          m_currentPosition(currentPosition),
-          m_individualIndex(0) {}
-
-    static inline VariantT singleCharToVariantT(char c) {
-        switch (c) {
-        case '0': return 0;
-        case '1': return 1;
-        case '2': return 2;
-        case '3': return 3;
-        case '4': return 4;
-        case '5': return 5;
-        case '6': return 6;
-        case '7': return 7;
-        case '8': return 8;
-        case '9': return 9;
-        case '.': return MISSING_VALUE;
+    IndividualIteratorGT(const std::vector<AlleleT>& gtArray, const std::vector<bool>& phased, const size_t maxPloidy)
+        : m_gtArray(gtArray),
+          m_phased(phased),
+          m_maxPloidy(maxPloidy),
+          m_individualIndex(0) {
+        if (m_maxPloidy > 2) {
+            PICOVCF_THROW_ERROR(ApiMisuse,
+                                "IndividualIterator does not support ploidy>2, use getGenotypeArray() instead");
         }
-        PICOVCF_THROW_ERROR(MalformedFile, "Invalid allele value: " << c);
-    }
-
-    static inline VariantT stringToVariantT(const std::string& str) {
-        if (str == ".") {
-            return MISSING_VALUE;
-        }
-        char* endPtr = nullptr;
-        const VariantT result = static_cast<VariantT>(std::strtoull(str.c_str(), &endPtr, 10));
-        if (endPtr != (str.c_str() + str.size())) {
-            PICOVCF_THROW_ERROR(MalformedFile, "Invalid allele value: " << str);
-        }
-        return result;
     }
 
     // Position in the line of the first individual.
-    const std::string& m_currentLine;
-    size_t m_currentPosition;
+    const std::vector<AlleleT>& m_gtArray;
+    const std::vector<bool>& m_phased;
+    size_t m_maxPloidy;
     // The 0-based index of the current individual.
     SampleT m_individualIndex;
 
@@ -647,6 +611,13 @@ struct VCFVariantInfo {
     std::vector<std::string> format;
 };
 
+enum VCFPhasedness {
+    PVCFP_UNKNOWN = 0,  /** Unknown phasedness */
+    PVCFP_PHASED = 1,   /** All samples are phased */
+    PVCFP_UNPHASED = 2, /** All samples are unphased */
+    PVCFP_MIXED = 3,    /** Samples are a mixture of phased/unphased */
+};
+
 /**
  * A class that lazily interprets the data for a single variant.
  *
@@ -654,10 +625,119 @@ struct VCFVariantInfo {
  * the positions of required fields and then parses those fields on demand. The
  * individual genotype data is accessed through another lazy view (iterator).
  */
+#if PICOVCF_USE_HTSLIB
+
+// Wrap all HTS allocated types in C++ destructors, to avoid memory management problems.
+template <typename T, typename DESTROY> class WrapCType {
+public:
+    WrapCType() = default;
+    WrapCType(T* mv)
+        : m(mv) {}
+    ~WrapCType() {
+        if (m != nullptr) {
+            DESTROY{}(m);
+        }
+    }
+    operator bool() const { return (m != nullptr); }
+    T* operator->() { return m; }
+    const T* operator->() const { return m; }
+    T* m{};
+};
+
+#define PVCF_MAKE_DESTROYER(func_name, type)                                                                           \
+    struct func_name##_dest {                                                                                          \
+        void operator()(type* value) { func_name(value); }                                                             \
+    }
+PVCF_MAKE_DESTROYER(bcf_hdr_destroy, bcf_hdr_t);
+PVCF_MAKE_DESTROYER(bcf_destroy, bcf1_t);
+PVCF_MAKE_DESTROYER(bcf_close, htsFile);
+PVCF_MAKE_DESTROYER(tbx_itr_destroy, hts_itr_t);
+PVCF_MAKE_DESTROYER(tbx_destroy, tbx_t);
+PVCF_MAKE_DESTROYER(bgzf_close, BGZF);
+
+using cpp_bcf_hdr_t = WrapCType<bcf_hdr_t, bcf_hdr_destroy_dest>;
+using cpp_bcf1_t = WrapCType<bcf1_t, bcf_destroy_dest>;
+using cpp_htsFile = WrapCType<htsFile, bcf_close_dest>;
+using cpp_hts_itr_t = WrapCType<hts_itr_t, tbx_itr_destroy_dest>;
+using cpp_tbx_t = WrapCType<tbx_t, tbx_destroy_dest>;
+using cpp_BGZF = WrapCType<BGZF, bgzf_close_dest>;
+
+struct cpp_kstring_t {
+    ~cpp_kstring_t() { ks_free(&val); }
+    kstring_t val{};
+};
+
+#undef PVCF_MAKE_DESTROYER
+#endif
+
 class VCFVariantView {
 public:
-    /** Genotype format string identifier. */
-    static constexpr const char* const FORMAT_GT = "GT";
+    /**
+     * Get the chromosome identifier.
+     * @returns String of the chromosome identifier.
+     */
+    virtual std::string getChrom() const = 0;
+
+    /**
+     * Get the genome position.
+     * @returns Integer of the genome position.
+     */
+    virtual size_t getPosition() const = 0;
+
+    /**
+     * Get the ID for this variant.
+     * @returns String of the ID.
+     */
+    virtual std::string getID() const = 0;
+
+    /**
+     * Get the reference allele for this variant.
+     * @returns String of the reference allele.
+     */
+    virtual std::string getRefAllele() const = 0;
+
+    /**
+     * Get the alternative alleles for this variant.
+     * @returns Vector of strings for all the alternative alleles. The allele
+     * index associated with each individual can be used to lookup the actual
+     * allele in this vector.
+     */
+    virtual std::vector<std::string> getAltAlleles() const = 0;
+
+    /**
+     * Get the quality value.
+     * @returns The numeric value for the quality.
+     */
+    virtual double getQuality() const = 0;
+
+    /**
+     * Get the filter value.
+     * @returns The string value for the filter.
+     */
+    virtual std::string getFilter() const = 0;
+
+    /**
+     * Get the info key/value pairs.
+     * @returns The information as a map from key to value.
+     */
+    virtual std::unordered_map<std::string, std::string> getInfo() const = 0;
+
+    /**
+     * @returns true if this VCF file contains genotype data.
+     */
+    virtual bool hasGenotypeData() const = 0;
+
+    /**
+     * Gets the list of formats.
+     *
+     * Enforces that "GT" must be the first FORMAT. If the resulting vector is
+     * empty then there is no FORMAT and thus there is no genotype data.
+     *
+     * @returns A vector the format strings.
+     */
+    virtual std::vector<std::string> getFormat() const = 0;
+
+    virtual std::vector<AlleleT> getGenotypeArray() = 0;
 
     /**
      * Parse and make a copy of the non-genotype data in this variant row. This
@@ -682,11 +762,39 @@ public:
         return std::move(result);
     }
 
+    VCFVariantView() = default;
+
+    const std::vector<bool>& getIsPhased() const { return m_phased; }
+
+    VCFPhasedness getPhasedness() const { return m_phasedness; }
+
+    AlleleT getMaxPloidy() const { return m_maxPloidy; }
+
+    virtual void reset() = 0;
+
+protected:
+    size_t m_numIndividuals;
+
+    // Bit for each individual, true when phased.
+    std::vector<bool> m_phased;
+    // The overall phasedness of the last variant parsed.
+    VCFPhasedness m_phasedness{};
+    // The maximum ploidy of the last variant parsed.
+    AlleleT m_maxPloidy;
+
+    friend class VCFFile;
+};
+
+class VCFVariantViewPico : public VCFVariantView {
+public:
+    /** Genotype format string identifier. */
+    static constexpr const char* const FORMAT_GT = "GT";
+
     /**
      * Get the chromosome identifier.
      * @returns String of the chromosome identifier.
      */
-    std::string getChrom() const { return m_currentLine.substr(0, m_nonGTPositions[POS_CHROM_END]); }
+    std::string getChrom() const { return m_currentLine->substr(0, m_nonGTPositions[POS_CHROM_END]); }
 
     /**
      * Get the genome position.
@@ -695,7 +803,7 @@ public:
     size_t getPosition() const {
         const size_t posSize = m_nonGTPositions[POS_POS_END] - m_nonGTPositions[POS_CHROM_END];
         assert(posSize > 0);
-        std::string posStr = m_currentLine.substr(m_nonGTPositions[POS_CHROM_END] + 1, posSize - 1);
+        std::string posStr = m_currentLine->substr(m_nonGTPositions[POS_CHROM_END] + 1, posSize - 1);
         char* endPtr = nullptr;
         const auto result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
         if (endPtr != (posStr.c_str() + posStr.size())) {
@@ -733,7 +841,7 @@ public:
         }
         std::vector<std::string> result;
         picovcf_split(alleleStr, ',', result);
-        return result;
+        return std::move(result);
     }
 
     /**
@@ -772,7 +880,7 @@ public:
         for (auto pair : infoPairs) {
             result.emplace(picovcf_getKey(pair, 0), picovcf_getValue(pair, 0));
         }
-        return result;
+        return std::move(result);
     }
 
     /**
@@ -804,23 +912,114 @@ public:
         if (result.empty() || result[0] != FORMAT_GT) {
             PICOVCF_THROW_ERROR(MalformedFile, "The first item in FORMAT _must_ be " << FORMAT_GT);
         }
-        return result;
+        return std::move(result);
     }
 
+    std::vector<AlleleT> getGenotypeArray() {
+        m_phased.clear();
+        m_phased.resize(m_numIndividuals, true); // Phased until proven otherwise
+
+        // This stores alleles in strides of N individuals. So:
+        // hap0: 1, 2, ..., N
+        // hap1: 1, 2, ..., N
+        // ...
+        // hapP: 1, 2, ..., N
+        //
+        // Where P is the maximum ploidy.
+        std::vector<AlleleT> values(m_numIndividuals, MIXED_PLOIDY);
+        m_phasedness = PVCFP_UNKNOWN;
+        m_maxPloidy = 0;
+        size_t currentPloidy = 1;
+        AlleleT currentValue = 0;
+        SampleT currentIndiv = 0;
+
+        auto processAllele = [&]() {
+            PICOVCF_ASSERT_OR_MALFORMED(currentIndiv < m_numIndividuals, "Too many genotypes");
+            const size_t offset = ((currentPloidy - 1) * m_numIndividuals) + currentIndiv;
+            if (offset >= values.size()) {
+                values.resize(currentPloidy * m_numIndividuals, MIXED_PLOIDY);
+                PICOVCF_RELEASE_ASSERT(offset < values.size());
+            }
+            values.at(offset) = currentValue;
+            currentValue = MIXED_PLOIDY;
+        };
+
+        for (size_t i = m_nonGTPositions[POS_FORMAT_END] + 1; i < m_currentLine->size(); i++) {
+            switch ((*m_currentLine)[i]) {
+            case '\t':
+            case '\r': {
+                processAllele();
+                currentPloidy = 1;
+                currentIndiv++;
+            } break;
+            case '0': currentValue = (currentValue == MIXED_PLOIDY) ? 0 : (currentValue * 10); break;
+            case '1': currentValue = (currentValue == MIXED_PLOIDY) ? 1 : ((currentValue * 10) + 1); break;
+            case '2': currentValue = (currentValue == MIXED_PLOIDY) ? 2 : ((currentValue * 10) + 2); break;
+            case '3': currentValue = (currentValue == MIXED_PLOIDY) ? 3 : ((currentValue * 10) + 3); break;
+            case '4': currentValue = (currentValue == MIXED_PLOIDY) ? 4 : ((currentValue * 10) + 4); break;
+            case '5': currentValue = (currentValue == MIXED_PLOIDY) ? 5 : ((currentValue * 10) + 5); break;
+            case '6': currentValue = (currentValue == MIXED_PLOIDY) ? 6 : ((currentValue * 10) + 6); break;
+            case '7': currentValue = (currentValue == MIXED_PLOIDY) ? 7 : ((currentValue * 10) + 7); break;
+            case '8': currentValue = (currentValue == MIXED_PLOIDY) ? 8 : ((currentValue * 10) + 8); break;
+            case '9': currentValue = (currentValue == MIXED_PLOIDY) ? 9 : ((currentValue * 10) + 9); break;
+            case '.': currentValue = MISSING_VALUE; break;
+            case '|':
+                if (m_phasedness == PVCFP_UNKNOWN) {
+                    m_phasedness = PVCFP_PHASED;
+                } else if (m_phasedness != PVCFP_PHASED) {
+                    m_phasedness = PVCFP_MIXED;
+                }
+                processAllele();
+                currentPloidy++;
+                break;
+            case '/': {
+                if (m_phasedness == PVCFP_UNKNOWN) {
+                    m_phasedness = PVCFP_UNPHASED;
+                } else if (m_phasedness != PVCFP_UNPHASED) {
+                    m_phasedness = PVCFP_MIXED;
+                }
+                m_phased.at(currentIndiv) = false;
+                processAllele();
+                currentPloidy++;
+            } break;
+            }
+        }
+        if (currentValue != MIXED_PLOIDY) {
+            processAllele();
+        }
+
+        // Change data layout.
+        m_maxPloidy = values.size() / m_numIndividuals;
+        std::vector<AlleleT> result(m_numIndividuals * m_maxPloidy);
+        for (size_t i = 0; i < m_maxPloidy; i++) {
+            for (size_t j = 0; j < m_numIndividuals; j++) {
+                result.at((j * m_maxPloidy) + i) = values.at((i * m_numIndividuals) + j);
+            }
+        }
+        if (m_maxPloidy == 1) {
+            m_phasedness = PVCFP_PHASED;
+        }
+        return std::move(result);
+    }
+
+    void initialize(const std::string* currentLine, size_t numIndividuals) {
+        m_currentLine = currentLine;
+        m_numIndividuals = numIndividuals;
+    }
+
+#if 0
     /**
      * Get an iterator for traversing over the individual genotype data.
      * @returns An IndividualIteratorGT for efficiently accessing the genotype
      * data.
      */
-    IndividualIteratorGT getIndividualIterator() const {
-        if (!hasGenotypeData()) {
-            PICOVCF_THROW_ERROR(ApiMisuse, "Cannot iterate individuals when there is no genotype data");
-        }
-        return IndividualIteratorGT(m_currentLine, m_nonGTPositions[POS_FORMAT_END] + 1);
+    inline IndividualIteratorGT getIndividualIterator() PICOVCF_DEPRECATED {
+        return IndividualIteratorGT(getGenotypeArray(), m_phased, m_maxPloidy);
     }
+#endif
 
-    // TODO we should have another (more general) iterator that can be used for
-    // non-GT data.
+    void reset() { parseNonGenotypePositions(); }
+
 private:
     enum {
         POS_CHROM_END = 0,
@@ -838,17 +1037,17 @@ private:
         assert(curEnd > 0);
         const size_t prevEnd = curEnd - 1;
         const size_t strSize = m_nonGTPositions[curEnd] - m_nonGTPositions[prevEnd];
-        return m_currentLine.substr(m_nonGTPositions[prevEnd] + 1, strSize - 1);
+        return m_currentLine->substr(m_nonGTPositions[prevEnd] + 1, strSize - 1);
     }
 
     void parseNonGenotypePositions() {
         size_t position = 0;
         for (size_t i = 0; i < m_nonGTPositions.size(); i++) {
-            position = m_currentLine.find_first_of("\t", position);
+            position = m_currentLine->find_first_of("\t", position);
             if (position == std::string::npos) {
                 if (i < REQUIRED_FIELDS) {
                     PICOVCF_THROW_ERROR(MalformedFile,
-                                        "Invalid line (missing required fields) at " << m_currentLine.substr(0, 100));
+                                        "Invalid line (missing required fields) at " << m_currentLine->substr(0, 100));
                 } else {
                     m_nonGTPositions[i] = INTERNAL_VALUE_NOT_SET;
                 }
@@ -859,19 +1058,255 @@ private:
         }
     }
 
-    explicit VCFVariantView(const std::string& currentLine)
-        : m_currentLine(currentLine) {}
-
-    void reset() { parseNonGenotypePositions(); }
-
     // FORMAT and genotype data is not required.
     static constexpr size_t REQUIRED_FIELDS = 8;
 
-    const std::string& m_currentLine;
+    const std::string* m_currentLine;
     std::array<size_t, 9> m_nonGTPositions;
-
-    friend class VCFFile;
 };
+
+#if PICOVCF_USE_HTSLIB
+class VCFVariantViewHTS : public VCFVariantView {
+public:
+    /**
+     * Get the chromosome identifier.
+     * @returns String of the chromosome identifier.
+     */
+    std::string getChrom() const {
+        if (m_currentRec->rid == -1) {
+            return "";
+        }
+        return bcf_hdr_id2name(m_htsHeader, m_currentRec->rid);
+    }
+
+    /**
+     * Get the genome position.
+     * @returns Integer of the genome position.
+     */
+    size_t getPosition() const { return static_cast<size_t>(m_currentRec->pos) + 1; }
+
+    /**
+     * Get the ID for this variant.
+     * @returns String of the ID.
+     */
+    std::string getID() const { return std::string(m_currentRec->d.id); }
+
+    /**
+     * Get the reference allele for this variant.
+     * @returns String of the reference allele.
+     */
+    std::string getRefAllele() const { return std::string(m_currentRec->d.allele[0]); }
+
+    /**
+     * Get the alternative alleles for this variant.
+     * @returns Vector of strings for all the alternative alleles. The allele
+     * index associated with each individual can be used to lookup the actual
+     * allele in this vector.
+     */
+    std::vector<std::string> getAltAlleles() const {
+        std::vector<std::string> alts;
+        for (size_t i = 1; i < m_currentRec->n_allele; i++) {
+            alts.emplace_back(m_currentRec->d.allele[i]);
+        }
+        return std::move(alts);
+    }
+
+    /**
+     * Get the quality value.
+     * @returns The numeric value for the quality.
+     */
+    double getQuality() const { return m_currentRec->qual; }
+
+    /**
+     * Get the filter value.
+     * @returns The string value for the filter.
+     */
+    std::string getFilter() const {
+        std::stringstream ssFilt;
+        for (size_t i = 0; i < m_currentRec->d.n_flt; i++) {
+            const char* key = m_htsHeader->id[BCF_DT_ID][m_currentRec->d.flt[i]].key;
+            ssFilt << key;
+            if (i != (m_currentRec->d.n_flt - 1)) {
+                ssFilt << ";";
+            }
+        }
+        return std::move(ssFilt.str());
+    }
+
+    /**
+     * Get the info key/value pairs.
+     * @returns The information as a map from key to value.
+     */
+    std::unordered_map<std::string, std::string> getInfo() const {
+        const bcf_info_t* info = m_currentRec->d.info;
+        std::unordered_map<std::string, std::string> result;
+        for (size_t i = 0; i < m_currentRec->n_info; i++) {
+            const char* key = m_htsHeader->id[BCF_DT_ID][info[i].key].key;
+            std::stringstream ssValue;
+            switch (info[i].type) {
+            case BCF_BT_INT8:
+            case BCF_BT_INT16:
+            case BCF_BT_INT32: {
+                int size = 0;
+                int32_t* value = nullptr;
+                PICOVCF_RELEASE_ASSERT(bcf_get_info_int32(m_htsHeader, m_currentRec.m, key, &value, &size));
+                for (size_t j = 0; j < size; j++) {
+                    ssValue << value[j];
+                    if (j != (size - 1)) {
+                        ssValue << ",";
+                    }
+                }
+            } break;
+            case BCF_BT_FLOAT: {
+                int size = 0;
+                float* value = nullptr;
+                PICOVCF_RELEASE_ASSERT(bcf_get_info_float(m_htsHeader, m_currentRec.m, key, &value, &size));
+                for (size_t j = 0; j < size; j++) {
+                    ssValue << value[j];
+                    if (j != (size - 1)) {
+                        ssValue << ",";
+                    }
+                }
+            } break;
+            case BCF_BT_CHAR: {
+                int size = 0;
+                char* value = nullptr;
+                PICOVCF_RELEASE_ASSERT(bcf_get_info_string(m_htsHeader, m_currentRec.m, key, &value, &size));
+                for (size_t j = 0; j < size; j++) {
+                    ssValue << value[j];
+                }
+            } break;
+            case BCF_BT_INT64:
+            case BCF_BT_NULL:
+            default: PICOVCF_THROW_ERROR(MalformedFile, "Invalid info type: " << info[i].type); break;
+            }
+            result.emplace(key, std::move(ssValue.str()));
+        }
+        return std::move(result);
+    }
+
+    /**
+     * @returns true if this VCF file contains genotype data.
+     */
+    bool hasGenotypeData() const {
+        std::vector<std::string> fmt = getFormat();
+        for (const auto& field : fmt) {
+            if (field == "GT") {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Gets the list of formats.
+     *
+     * Enforces that "GT" must be the first FORMAT. If the resulting vector is
+     * empty then there is no FORMAT and thus there is no genotype data.
+     *
+     * @returns A vector the format strings.
+     */
+    std::vector<std::string> getFormat() const {
+        std::vector<std::string> result;
+        for (size_t i = 0; i < m_currentRec->n_fmt; i++) {
+            bcf_fmt_t* fmt = &m_currentRec->d.fmt[i];
+            const char* key = m_htsHeader->id[BCF_DT_ID][fmt->id].key;
+            result.emplace_back(key);
+        }
+        return std::move(result);
+    }
+
+    std::vector<AlleleT> getGenotypeArray() {
+        m_phased.clear();
+        m_phased.resize(m_numIndividuals);
+
+        static_assert(sizeof(AlleleT) == sizeof(int32_t));
+        int32_t numGenotypes = 0;
+        int32_t* resultPtr = nullptr;
+        int numGT = bcf_get_genotypes(m_htsHeader, m_currentRec.m, &resultPtr, &numGenotypes);
+        if (numGT < 0) {
+            return {};
+        }
+        PICOVCF_RELEASE_ASSERT(resultPtr != nullptr);
+
+        const size_t numIndividuals = static_cast<size_t>(bcf_hdr_nsamples(m_htsHeader));
+        m_maxPloidy = static_cast<size_t>(numGT) / numIndividuals;
+
+        std::vector<AlleleT> result;
+        result.reserve(numGT);
+        m_phasedness = PVCFP_UNKNOWN;
+        for (size_t i = 0; i < numIndividuals; i++) {
+            int32_t* base = &resultPtr[i * m_maxPloidy];
+            bool phased = false;
+            for (size_t j = 0; j < m_maxPloidy; j++) {
+                if (base[j] == bcf_int32_vector_end) {
+                    result.emplace_back(MIXED_PLOIDY);
+                } else if (bcf_gt_is_missing(base[j])) {
+                    result.emplace_back(MISSING_VALUE);
+                } else {
+                    result.emplace_back(bcf_gt_allele(base[j]));
+                    phased = (bool)bcf_gt_is_phased(base[j]) || (m_maxPloidy == 1);
+                }
+            }
+            // The phasedness of the last (valid) allele of the individual determines the
+            // overall phasedness.
+            m_phased.push_back(phased);
+            switch (m_phasedness) {
+            case PVCFP_UNKNOWN: m_phasedness = phased ? PVCFP_PHASED : PVCFP_UNPHASED; break;
+            case PVCFP_PHASED:
+                if (!phased) {
+                    m_phasedness = PVCFP_MIXED;
+                }
+                break;
+            case PVCFP_UNPHASED:
+                if (phased) {
+                    m_phasedness = PVCFP_MIXED;
+                }
+                break;
+            case PVCFP_MIXED:
+            default: break;
+            }
+        }
+        free(resultPtr);
+        return std::move(result);
+    }
+
+    void initialize(bcf_hdr_t* header, kstring_t* currentLine, size_t numIndividuals) {
+        m_valid = false;
+        m_currentLine = currentLine;
+        m_htsHeader = header;
+        m_numIndividuals = numIndividuals;
+        m_currentRec.m = bcf_init();
+    }
+
+    void reset() {
+        m_phased.clear();
+        m_phasedness = PVCFP_UNKNOWN;
+
+        int ret = vcf_parse1(m_currentLine, m_htsHeader, m_currentRec.m);
+        if (ret < 0) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "Failed parsing current variant");
+        }
+        bcf_unpack(m_currentRec.m, BCF_UN_ALL);
+        m_valid = true;
+    }
+
+private:
+    kstring_t* m_currentLine{};
+    bcf_hdr_t* m_htsHeader{};
+    cpp_bcf1_t m_currentRec{};
+    bool m_valid{};
+};
+#endif
+
+// String constants in a header-only library are tricky with C++11, so use preprocessor.
+
+/** Traverse all contigs */
+#define PVCF_VCFFILE_CONTIG_ALL "picovcf_all_contigs"
+/** Traverse only the first contig that contains at least one variant */
+#define PVCF_VCFFILE_CONTIG_FIRST "picovcf_first_nonempty"
+/** Throw an error if the file contains more than one contig with at least one variant */
+#define PVCF_VCFFILE_CONTIG_REQUIRE_ONE "picovcf_require_one"
 
 /**
  * A lazy parser for VCF files.
@@ -879,7 +1314,7 @@ private:
  * Loads the data into memory a line at a time. Does not parse the entire line,
  * as users often only need certain pieces of information.
  */
-class VCFFile {
+class VCFFileBase {
 public:
     static constexpr const char* const SUPPORTED_PREFIX = "VCFv4";
     static constexpr const char* const META_FILE_FORMAT = "fileformat";
@@ -890,40 +1325,104 @@ public:
     // 1MB buffer for reading uncompressed data. Larger is faster, to a point.
     static constexpr size_t UNCOMPRESSED_BUFFER_SIZE = 1024 * 1024;
 
-    explicit VCFFile(const std::string& filename)
-        : m_variants(INTERNAL_VALUE_NOT_SET),
-          m_genomeRange({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
-          m_posVariants({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
-          m_currentVariant(m_currentLine) {
-        if (filename.size() > 3 && filename.substr(filename.size() - 3) == ".gz") {
-#if VCF_GZ_SUPPORT
-            m_infile = std::unique_ptr<BufferedReader>(new ZBufferedReader(filename, COMPRESSED_BUFFER_SIZE));
-#else
-            PICOVCF_THROW_ERROR(ApiMisuse, "picovcf was not compiled with zlib support (VCF_GZ_SUPPORT)");
-#endif
-        } else {
-            m_infile = std::unique_ptr<BufferedReader>(new BufferedReader(filename, UNCOMPRESSED_BUFFER_SIZE));
-        }
-        parseHeader();
+    enum ContigHandling {
+        PVCH_ALL = 0,
+        PVCH_ONE = 1,
+        PVCH_SPECIFIC = 2,
+    };
 
-        std::string version = getMetaInfo(VCFFile::META_FILE_FORMAT);
-        if (version.substr(0, 5) == SUPPORTED_PREFIX) {
-            if (version.size() > 6 && !(version[6] != '0' || version[6] == '1' || version[6] == '2')) {
-                PICOVCF_THROW_ERROR(MalformedFile, "Unsupported VCF version: " << version);
+    explicit VCFFileBase(const std::string& filename, std::string contig = PVCF_VCFFILE_CONTIG_ALL, bool verbose = true)
+        : m_filename(filename),
+          m_variants(INTERNAL_VALUE_NOT_SET),
+          m_genomeRange({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
+          m_verbose(verbose) {}
+
+    virtual void initContigs(std::string contig) {
+        std::string ignore;
+        size_t length = 0;
+        if (contig == PVCF_VCFFILE_CONTIG_ALL) {
+            m_contigHandling = PVCH_ALL;
+            PICOVCF_RELEASE_ASSERT(m_contig.empty());
+        } else if (contig == PVCF_VCFFILE_CONTIG_FIRST || contig == PVCF_VCFFILE_CONTIG_REQUIRE_ONE) {
+            PICOVCF_RELEASE_ASSERT(m_contig.empty());
+            VCFVariantView& first = getFirstVariantUnfiltered();
+            m_contig = first.getChrom();
+            if (contig == PVCF_VCFFILE_CONTIG_REQUIRE_ONE) {
+                m_contigHandling = PVCH_ONE;
+            } else {
+                m_contigHandling = PVCH_SPECIFIC;
             }
         } else {
-            PICOVCF_THROW_ERROR(MalformedFile, "Unsupported VCF version: " << version);
+            if (!getContig(contig, length, ignore)) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Could not contig with ID " << contig);
+            }
+            PICOVCF_ASSERT_OR_MALFORMED(length > 0, "0-length contig in header");
+            m_contigHandling = PVCH_SPECIFIC;
+            m_contig = contig;
         }
+        if (!m_contig.empty() && getContig(m_contig, length, ignore)) {
+            m_genomeRange.first = 0;
+            m_genomeRange.second = length;
+        }
+    }
+
+    /**
+     * Is this VCF file using an index for fast random access?
+     *
+     * @return true if an index is being used.
+     */
+    virtual bool isUsingIndex() const = 0;
+
+    /**
+     * Get information for the contig with the given name.
+     *
+     * @param[in] contig The contig name, as found in the VCF header.
+     * @param[out] length Returns the length found in the VCF header, if the function return value
+     *      was true.
+     * @param[out] assembly Returns the assembly name found in the VCF header, if the function return
+     *      value was true.
+     * @return true if the contig was found, false otherwise.
+     */
+    virtual bool getContig(const std::string& contig, size_t& length, std::string& assembly) {
+        bool found = false;
+        for (const auto& metaString : getAllMetaInfo("contig")) {
+            std::map<std::string, std::string> kv = picovcf::picovcf_parse_structured_meta(metaString);
+            auto findIt = kv.find("ID");
+            PICOVCF_ASSERT_OR_MALFORMED(findIt != kv.end(), "contig metadata is missing ID field");
+            const std::string& ident = findIt->second;
+            if (ident == contig) {
+                findIt = kv.find("assembly");
+                if (findIt != kv.end()) {
+                    assembly = findIt->second;
+                } else {
+                    assembly = "";
+                }
+                findIt = kv.find("length");
+                if (findIt != kv.end()) {
+                    const std::string& lenStr = findIt->second;
+                    char* endPtr = nullptr;
+                    length = static_cast<size_t>(std::strtoull(lenStr.c_str(), &endPtr, 10));
+                    if (endPtr != (lenStr.c_str() + lenStr.size())) {
+                        PICOVCF_THROW_ERROR(MalformedFile, "Invalid contig length: " << lenStr);
+                    }
+                } else {
+                    length = 0;
+                }
+                found = true;
+                break;
+            }
+        }
+        return found;
     }
 
     /**
      * Compute the number of variants in the file: expensive!
      * This is not a constant time operation, it involves scanning the entire
-     * file.
+     * file. It is faster for indexed files, as only the index is scanned.
      *
      * @return The number of variants.
      */
-    size_t numVariants() {
+    virtual size_t numVariants() {
         if (m_variants == INTERNAL_VALUE_NOT_SET) {
             scanVariants();
         }
@@ -932,13 +1431,14 @@ public:
 
     /**
      * Compute the range of positions for variants in the file.
-     * This is not a constant time operation, it involves scanning the entire
-     * file.
+     * If the VCF metadata does not contain contigs then this is not a constant time operation,
+     * it involves scanning the entire file. Otherwise the sequence length in the contig header
+     * is used.
      *
      * @return A pair of the minimum and maximum variant positions present in the
      * file.
      */
-    RangePair getGenomeRange() {
+    virtual RangePair getGenomeRange() {
         if (m_genomeRange.first == INTERNAL_VALUE_NOT_SET) {
             scanVariants();
         }
@@ -949,20 +1449,20 @@ public:
      * Get the number of individuals with labels in the VCF file.
      * @return number of individuals.
      */
-    size_t numIndividuals() { return m_individualLabels.size(); }
+    virtual size_t numIndividuals() { return m_individualLabels.size(); }
 
     /**
      * Get a list of the labels for the individuals in the VCF file.
      * @return vector of strings, where the 0th is the 0th individuals label, etc.
      */
-    std::vector<std::string>& getIndividualLabels() { return m_individualLabels; }
+    virtual std::vector<std::string>& getIndividualLabels() { return m_individualLabels; }
 
     /**
      * Get all metadata values for a given key, from the VCF header rows.
      * @param[in] key The metadata key name.
      * @return the string associated with the given key, or empty string.
      */
-    std::vector<std::string> getAllMetaInfo(const char* const key) const {
+    virtual std::vector<std::string> getAllMetaInfo(const char* const key) const {
         std::vector<std::string> result;
         const auto metaIt = m_metaInformation.equal_range(key);
         for (auto it = metaIt.first; it != metaIt.second; it++) {
@@ -979,7 +1479,7 @@ public:
      * @return the string associated with the given key, or empty string.
      * @throw MalformedFile exception thrown if the key does
      */
-    std::string getMetaInfo(const char* const key) const {
+    virtual std::string getMetaInfo(const char* const key) const {
         auto metaList = getAllMetaInfo(key);
         if (metaList.empty()) {
             PICOVCF_THROW_ERROR(ApiMisuse, "No metadata for key " << key);
@@ -989,6 +1489,120 @@ public:
         }
         return std::move(metaList[0]);
     }
+
+    /**
+     * Change the parser position to be immediately _before_ the first variant.
+     */
+    virtual void seekBeforeVariants() = 0;
+
+    /**
+     * Read the variant at the current file position and move the file position to
+     * the following variant.
+     */
+    virtual bool nextVariant() = 0;
+
+    /**
+     * Get a parseable view of the variant that we last encountered with
+     * nextVariant().
+     * @return A VCFVariantView that can be queried for variant information.
+     */
+    VCFVariantView& currentVariant() { return *m_currentVariant; }
+
+    /**
+     * Seek to the first variant greater than or equal to the given position.
+     */
+    virtual void lowerBoundPosition(size_t position) = 0;
+
+protected:
+    virtual VCFVariantView& getFirstVariantUnfiltered() = 0;
+    virtual void scanVariants() = 0;
+
+    inline bool useVariant(const VCFVariantView& variant) const {
+        switch (m_contigHandling) {
+        case PVCH_ONE:
+            if (m_contig != variant.getChrom()) {
+                PICOVCF_THROW_ERROR(ApiMisuse,
+                                    "User specified file should contain a single contig, but it contained at least 2");
+            }
+            return true;
+        case PVCH_SPECIFIC: return (m_contig == variant.getChrom());
+        case PVCH_ALL:
+        default: return true;
+        }
+    }
+
+    std::string m_filename;
+    // Metadata dictionary
+    std::multimap<std::string, std::string> m_metaInformation;
+    // Labels for individuals
+    std::vector<std::string> m_individualLabels;
+    // The current variant we are examining.
+    std::unique_ptr<VCFVariantView> m_currentVariant;
+    // The number of variants represented
+    size_t m_variants;
+    // The min/max genome range
+    RangePair m_genomeRange;
+
+    ContigHandling m_contigHandling;
+    std::string m_contig;
+
+    bool m_verbose;
+};
+
+class VCFFile : public VCFFileBase {
+public:
+    static constexpr const char* const SUPPORTED_PREFIX = "VCFv4";
+    static constexpr const char* const META_FILE_FORMAT = "fileformat";
+
+    // 128kb for reading compressed data from the file, note this is likely to
+    // result in an uncompressed buffer of a few megabytes.
+    static constexpr size_t COMPRESSED_BUFFER_SIZE = 128 * 1024;
+    // 1MB buffer for reading uncompressed data. Larger is faster, to a point.
+    static constexpr size_t UNCOMPRESSED_BUFFER_SIZE = 1024 * 1024;
+
+    enum ContigHandling {
+        PVCH_ALL = 0,
+        PVCH_ONE = 1,
+        PVCH_SPECIFIC = 2,
+    };
+
+    explicit VCFFile(const std::string& filename, std::string contig = PVCF_VCFFILE_CONTIG_ALL, bool verbose = true)
+        : VCFFileBase(filename, contig, verbose),
+          m_posVariants({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}) {
+        if (filename.size() > 3 && filename.substr(filename.size() - 3) == ".gz") {
+#if VCF_GZ_SUPPORT
+            m_infile = std::unique_ptr<BufferedReader>(new ZBufferedReader(filename, COMPRESSED_BUFFER_SIZE));
+#else
+            PICOVCF_THROW_ERROR(ApiMisuse, "picovcf was not compiled with zlib support (VCF_GZ_SUPPORT)");
+#endif
+        } else {
+            m_infile = std::unique_ptr<BufferedReader>(new BufferedReader(filename, UNCOMPRESSED_BUFFER_SIZE));
+        }
+        parseHeader();
+
+        VCFVariantViewPico* variantView = new VCFVariantViewPico();
+        PICOVCF_RELEASE_ASSERT(variantView != nullptr);
+        variantView->initialize(&m_currentLine, numIndividuals());
+        m_currentVariant = std::unique_ptr<VCFVariantView>(variantView);
+
+        initContigs(contig);
+
+        std::string version = getMetaInfo(VCFFileBase::META_FILE_FORMAT);
+        if (version.substr(0, 5) == SUPPORTED_PREFIX) {
+            if (version.size() > 6 && !(version[6] != '0' || version[6] == '1' || version[6] == '2')) {
+                PICOVCF_THROW_ERROR(MalformedFile, "Unsupported VCF version: " << version);
+            }
+        } else {
+            PICOVCF_THROW_ERROR(MalformedFile, "Unsupported VCF version: " << version);
+        }
+    }
+
+    /**
+     * Is this VCF file using an index for fast random access?
+     *
+     * @return true if an index is being used.
+     */
+    virtual bool isUsingIndex() const override { return false; }
 
     /**
      * Get an opaque handle describing the current file position of the parser.
@@ -1005,37 +1619,50 @@ public:
     /**
      * Change the parser position to be immediately _before_ the first variant.
      */
-    void seekBeforeVariants() {
+    virtual void seekBeforeVariants() override {
         PICOVCF_ASSERT_OR_MALFORMED(m_posVariants.first != INTERNAL_VALUE_NOT_SET, "File has no variant data");
         setFilePosition(m_posVariants);
     }
 
     /**
-     * Is there a variant at the current file position?
-     * @returns true if calling nextVariant() will place us at a valid variant.
-     */
-    bool hasNextVariant() { return !picovcf_peek_eof(m_infile.get()); }
-
-    /**
      * Read the variant at the current file position and move the file position to
      * the following variant.
      */
-    void nextVariant() {
-        if (picovcf_peek_eof(m_infile.get())) {
-            PICOVCF_THROW_ERROR(ApiMisuse, "Tried to move to next variant when there aren't any");
+    virtual bool nextVariant() override {
+        bool more = false;
+        while (m_infile->readline(m_currentLine) > 0) {
+            m_currentVariant->reset();
+            if (useVariant(*m_currentVariant)) {
+                more = true;
+                break;
+            }
         }
-        m_infile->readline(m_currentLine);
-        m_currentVariant.reset();
+        return more;
     }
 
     /**
-     * Get a parseable view of the variant that we last encountered with
-     * nextVariant().
-     * @return A VCFVariantView that can be queried for variant information.
+     * Seek to the first variant greater than or equal to the given position.
      */
-    VCFVariantView& currentVariant() { return m_currentVariant; }
+    virtual void lowerBoundPosition(size_t position) override {
+        while (nextVariant()) {
+            if (currentVariant().getPosition() >= position) {
+                break;
+            }
+        }
+    }
 
 private:
+    virtual VCFVariantView& getFirstVariantUnfiltered() override {
+        const FileOffset saved = getFilePosition();
+        seekBeforeVariants();
+        if (!nextVariant()) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "VCF file has no variants");
+        }
+        auto& result = currentVariant();
+        setFilePosition(saved);
+        return result;
+    }
+
     void parseHeader() {
         FileOffset prevPosition = {0, 0};
         std::string lineBuffer;
@@ -1083,42 +1710,240 @@ private:
         PICOVCF_ASSERT_OR_MALFORMED(sawHeader, "No header line (column names) found.");
     }
 
-    void scanVariants() {
+    virtual void scanVariants() override {
         m_variants = 0;
+        const bool computeRange = (m_genomeRange.first == INTERNAL_VALUE_NOT_SET);
+        if (computeRange) {
+            m_genomeRange.second = 0;
+        }
         const auto originalPosition = getFilePosition();
         this->seekBeforeVariants();
-        m_genomeRange.second = 0;
-        while (this->hasNextVariant()) {
-            this->nextVariant();
-            VCFVariantView variant = this->currentVariant();
+        while (this->nextVariant()) {
+            const VCFVariantView& variant = this->currentVariant();
+            if (!useVariant(variant)) {
+                continue;
+            }
             const double position = variant.getPosition();
             if (m_genomeRange.first == INTERNAL_VALUE_NOT_SET) {
                 m_genomeRange.first = position;
             }
-            PICOVCF_ASSERT_OR_MALFORMED(m_genomeRange.second <= position,
-                                        "VCF rows must be in ascending genome position");
-            m_genomeRange.second = position;
+            if (computeRange) {
+                PICOVCF_ASSERT_OR_MALFORMED(m_genomeRange.second <= position,
+                                            "VCF rows must be in ascending genome position");
+                m_genomeRange.second = position;
+            }
             m_variants++;
         }
         setFilePosition(originalPosition);
     }
 
     std::unique_ptr<BufferedReader> m_infile;
-    // The number of variants represented
-    size_t m_variants;
-    // The min/max genome range
-    RangePair m_genomeRange;
     // Starting position (offset) in the file for the variants information
     FileOffset m_posVariants;
-    // Metadata dictionary
-    std::multimap<std::string, std::string> m_metaInformation;
-    // Labels for individuals
-    std::vector<std::string> m_individualLabels;
-
-    // These three members represent the current variant we're looking at.
-    VCFVariantView m_currentVariant;
+    // Corresponds to the current variant.
     std::string m_currentLine;
 };
+
+#if PICOVCF_USE_HTSLIB
+/**
+ * A lazy parser for VCF files.
+ *
+ * Loads the data into memory a line at a time. Does not parse the entire line,
+ * as users often only need certain pieces of information.
+ */
+class HTSVCFFile : public VCFFileBase {
+public:
+    explicit HTSVCFFile(const std::string& filename,
+                        std::string contig = PVCF_VCFFILE_CONTIG_ALL,
+                        bool failOnNoIndex = false,
+                        bool verbose = true)
+        : VCFFileBase(filename, contig, verbose) {
+        m_htsFile.m = vcf_open(filename.c_str(), "r");
+        if (!m_htsFile) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "Could not read VCF file " << filename);
+        }
+
+        // We require a file index. If there is not one, then we generate it on the fly (but don't save it
+        // to disk).
+        m_tabix.m = tbx_index_load(filename.c_str());
+        if (!m_tabix && m_verbose) {
+            if (failOnNoIndex) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "No tabix index: " << filename);
+            }
+            std::cerr << "WARNING: No tabix index found for " << m_filename << ", indexing the file..." << std::endl;
+            const tbx_conf_t conf = tbx_conf_vcf;
+            cpp_BGZF fp(bgzf_open(filename.c_str(), "r"));
+            PICOVCF_RELEASE_ASSERT(fp);
+            m_tabix.m = tbx_index(fp.m, -1, &conf);
+        }
+
+        m_htsHeader.m = bcf_hdr_read(m_htsFile.m);
+        if (!m_htsHeader) {
+            PICOVCF_THROW_ERROR(MalformedFile, "Failed to parse VCF header for " << filename);
+        }
+
+        const size_t numSamples = bcf_hdr_nsamples(m_htsHeader.m);
+        for (size_t i = 0; i < numSamples; i++) {
+            m_individualLabels.emplace_back(m_htsHeader->samples[i]);
+        }
+
+        VCFVariantViewHTS* variantView = new VCFVariantViewHTS();
+        PICOVCF_RELEASE_ASSERT(variantView != nullptr);
+        variantView->initialize(m_htsHeader.m, &m_currentKStr.val, numSamples);
+        m_currentVariant = std::unique_ptr<VCFVariantView>(variantView);
+
+        m_contigs = bcf_hdr_seqnames(m_htsHeader.m, &m_numContigs);
+        PICOVCF_ASSERT_OR_MALFORMED(m_numContigs > 0, "No contigs found in VCF file");
+        PICOVCF_ASSERT_OR_MALFORMED(m_contigs != nullptr, "Failed to get contigs from VCF file");
+
+        // This is kind of gross. We reconstruct the header information as strings from htslib, so that we can use
+        // our pre-existing string parsing functionality. The alternative would be to make a more first-class
+        // representation in picovcf, which I don't want to do (yet?)
+        for (size_t i = 0; i < m_htsHeader->nhrec; i++) {
+            if (m_htsHeader->hrec[i]->type == BCF_HL_GEN) {
+                m_metaInformation.emplace(m_htsHeader->hrec[i]->key, m_htsHeader->hrec[i]->value);
+            } else {
+                std::stringstream ssValue;
+                ssValue << "<";
+                const size_t numKeys = m_htsHeader->hrec[i]->nkeys;
+                for (size_t j = 0; j < numKeys; j++) {
+                    ssValue << m_htsHeader->hrec[i]->keys[j] << "=\"" << m_htsHeader->hrec[i]->vals[j] << "\"";
+                    if (j != numKeys) {
+                        ssValue << ",";
+                    }
+                }
+                ssValue << ">";
+                m_metaInformation.emplace(m_htsHeader->hrec[i]->key, std::move(ssValue.str()));
+            }
+        }
+
+        initContigs(contig);
+    }
+
+    /**
+     * Is this VCF file using an index for fast random access?
+     *
+     * @return true if an index is being used.
+     */
+    virtual bool isUsingIndex() const override { return true; }
+
+    /**
+     * Change the parser position to be immediately _before_ the first variant.
+     */
+    virtual void seekBeforeVariants() override { resetIteratorForContig(0); }
+
+    /**
+     * Read the variant at the current file position and move the file position to
+     * the following variant.
+     */
+    virtual bool nextVariant() override {
+        if (!m_currentIterator) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "No iterator; must call seekBeforeVariants()");
+        }
+        PICOVCF_RELEASE_ASSERT(m_tabix);
+        int res = tbx_itr_next(m_htsFile.m, m_tabix.m, m_currentIterator.m, &m_currentKStr.val);
+        if (res >= 0) {
+            PICOVCF_RELEASE_ASSERT(m_currentKStr.val.s != nullptr);
+            m_currentVariant->reset();
+        }
+        return (res >= 0);
+    }
+
+    /**
+     * Seek to the first variant greater than or equal to the given position.
+     */
+    virtual void lowerBoundPosition(size_t position) override { resetIteratorForContig(position - 1); }
+
+private:
+    void resetIteratorForContig(size_t start) {
+        int tid = 0;
+        switch (m_contigHandling) {
+        case PVCH_SPECIFIC:
+        case PVCH_ONE: tid = tbx_name2id(m_tabix.m, m_contig.c_str()); break;
+        case PVCH_ALL:
+        default: tid = HTS_IDX_START; break;
+        }
+        m_currentIterator.~WrapCType();
+        m_currentIterator.m = tbx_itr_queryi(m_tabix.m, tid, start, MAX_SUPPORTED_POSITION);
+    }
+
+    virtual VCFVariantView& getFirstVariantUnfiltered() override {
+        seekBeforeVariants();
+        if (!nextVariant()) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "VCF file has no variants");
+        }
+        auto& result = currentVariant();
+        return result;
+    }
+
+    virtual void scanVariants() override {
+        m_variants = 0;
+        const bool computeRange = (m_genomeRange.first == INTERNAL_VALUE_NOT_SET);
+        if (computeRange) {
+            m_genomeRange.second = 0;
+        }
+        resetIteratorForContig(0);
+        PICOVCF_RELEASE_ASSERT(m_tabix);
+        cpp_bcf1_t tempRecord{bcf_init()};
+        int res = 0;
+        bool first = true;
+        cpp_kstring_t tempString{};
+        for (size_t i = 0; i < m_numContigs; i++) {
+            cpp_hts_itr_t tabixIt{tbx_itr_querys(m_tabix.m, m_contigs[i])};
+            if (tabixIt) {
+                while (res = tbx_itr_next(m_htsFile.m, m_tabix.m, tabixIt.m, &tempString.val), res >= 0) {
+                    if (first) {
+                        std::cout << "Parse\n";
+                        PICOVCF_ASSERT_OR_MALFORMED(0 == vcf_parse1(&tempString.val, m_htsHeader.m, tempRecord.m),
+                                                    "HTSLIB parse1 failure");
+                        m_genomeRange.first = tempRecord->pos;
+                        first = false;
+                    }
+                    m_variants++;
+                }
+                std::cout << "Parse\n";
+                PICOVCF_ASSERT_OR_MALFORMED(!first, "VCF file has no variants");
+                PICOVCF_ASSERT_OR_MALFORMED(0 == vcf_parse1(&tempString.val, m_htsHeader.m, tempRecord.m),
+                                            "HTSLIB parse1 failure");
+                m_genomeRange.second = tempRecord->pos;
+            }
+        }
+    }
+
+    cpp_htsFile m_htsFile{};
+    cpp_bcf_hdr_t m_htsHeader{};
+    cpp_tbx_t m_tabix{};
+    cpp_hts_itr_t m_currentIterator{};
+    const char** m_contigs{};
+    int m_numContigs{};
+    cpp_kstring_t m_currentKStr{};
+};
+#endif
+
+inline std::shared_ptr<VCFFileBase> openVCFFile(const std::string& filename,
+                                                std::string contig = PVCF_VCFFILE_CONTIG_ALL,
+                                                bool failOnNoIndex = false,
+                                                bool verbose = true) {
+    // First, try htslib if it is available and the VCF file is compressed as BGZF.
+#if PICOVCF_USE_HTSLIB
+    BGZF* bgzf = bgzf_open(filename.c_str(), "r");
+    PICOVCF_RELEASE_ASSERT(bgzf != nullptr);
+    const bool useHts = (bgzf_compression(bgzf) == 2);
+    bgzf_close(bgzf);
+    if (useHts) {
+        if (verbose) {
+            std::cerr << "HTSLIB support is available, so using it\n";
+        }
+        return std::make_shared<HTSVCFFile>(filename, std::move(contig), failOnNoIndex, verbose);
+    }
+#endif
+    if (failOnNoIndex) {
+        throw ApiMisuse(
+            "HTSLIB unsupported or not a BGZF file; failing because no index. (use failOnNoIndex = false if desired)");
+    }
+    // Otherwise, use picovcf's builtin parser, which is not indexable, but supports non-BGZF files.
+    return std::make_shared<VCFFile>(filename, std::move(contig), verbose);
+}
 
 template <typename T> static inline T readScalar(std::istream& inStream) {
     T simpleValue = 0;
@@ -1141,11 +1966,6 @@ static inline std::string readString(const uint64_t version, std::istream& inStr
     inStream.read(const_cast<char*>(strValue.c_str()), strLength);
     return std::move(strValue);
 }
-
-enum PloidyHandling {
-    PH_STRICT = 0,        /*!< Strict ploidy handling: retain ploidy, only allow a single ploidy for all data. */
-    PH_FORCE_DIPLOID = 1, /*!< Force all variants to diploid, making both alleles identical for haploid input. */
-};
 
 /** Vector of sample indexes (IDs) */
 using IGDSampleList = std::vector<SampleT>;
@@ -1930,100 +2750,127 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      bool emitIndividualIds = false,
                      bool emitVariantIds = false,
                      bool forceUnphased = false,
-                     const PloidyHandling handlePloidy = PH_STRICT,
+                     const size_t forceToPloidy = 0,
                      bool dropUnphased = false,
-                     void (*variantCallback)(const VCFFile&, const VCFVariantView&, void*) = nullptr,
+                     void (*variantCallback)(const VCFFileBase*, VCFVariantView&, void*) = nullptr,
                      void* callbackContext = nullptr) {
-    VCFFile vcf(vcfFilename);
-    vcf.seekBeforeVariants();
-    PICOVCF_ASSERT_OR_MALFORMED(vcf.hasNextVariant(), "VCF file has no variants");
-    vcf.nextVariant();
-    VCFVariantView& variant1 = vcf.currentVariant();
+    auto vcf = openVCFFile(vcfFilename);
+
+    vcf->seekBeforeVariants();
+    PICOVCF_ASSERT_OR_MALFORMED(vcf->nextVariant(), "VCF file has no variants");
+    VCFVariantView& variant1 = vcf->currentVariant();
     PICOVCF_ASSERT_OR_MALFORMED(variant1.hasGenotypeData(), "VCF file has no genotype data");
 
-    IndividualIteratorGT firstIndividual = variant1.getIndividualIterator();
-    PICOVCF_ASSERT_OR_MALFORMED(firstIndividual.hasNext(), "VCF file has no genotype data");
-    VariantT allele1 = 0;
-    VariantT allele2 = 0;
-    const bool isPhased =
-        !forceUnphased && (dropUnphased || firstIndividual.getAlleles(allele1, allele2, /*moveNext=*/false));
-    const uint64_t ploidy = (handlePloidy == PH_STRICT ? ((allele2 == NOT_DIPLOID) ? 1 : 2) : 2);
-    PICOVCF_RELEASE_ASSERT(handlePloidy != PH_FORCE_DIPLOID || ploidy == 2);
+    std::vector<AlleleT> firstGT = variant1.getGenotypeArray();
+    PICOVCF_ASSERT_OR_MALFORMED(!firstGT.empty(), "VCF file has no genotype data");
+    const VCFPhasedness phasedness = variant1.getPhasedness();
+    PICOVCF_RELEASE_ASSERT(phasedness != PVCFP_UNKNOWN);
+    if (phasedness == PVCFP_MIXED) {
+        if (!forceUnphased || !dropUnphased) {
+            throw ApiMisuse(
+                "VCF has mixed phasedness, which is only supported when dropUnphased=True or forceUnphased=True");
+        }
+    }
+    const bool isPhased = !forceUnphased && (dropUnphased || phasedness == PVCFP_PHASED);
+    const uint64_t ploidy = (forceToPloidy == 0) ? variant1.getMaxPloidy() : forceToPloidy;
 
     std::vector<std::string> variantIds;
     std::ofstream outFile(outFilename, std::ios::binary);
-    IGDWriter writer(ploidy, vcf.numIndividuals(), isPhased);
+    IGDWriter writer(ploidy, vcf->numIndividuals(), isPhased);
     writer.writeHeader(outFile, vcfFilename, description);
-    vcf.seekBeforeVariants();
-    while (vcf.hasNextVariant()) {
-        vcf.nextVariant();
-        const VCFVariantView& variant = vcf.currentVariant();
-        IndividualIteratorGT individualIt = variant.getIndividualIterator();
+    vcf->seekBeforeVariants();
+    while (vcf->nextVariant()) {
+        VCFVariantView& variant = vcf->currentVariant();
+        std::vector<AlleleT> genotypes = variant.getGenotypeArray();
         auto altAlleles = variant.getAltAlleles();
         IGDSampleList missingData;
         const size_t numSampleLists = isPhased ? altAlleles.size() : (altAlleles.size() * ploidy);
         std::vector<IGDSampleList> variantGtData(numSampleLists);
         SampleT sampleIndex = 0;
         const auto position = variant.getPosition();
-        bool skipVariant = false;
-        while (individualIt.hasNext()) {
-            const bool isPhasedI = individualIt.getAlleles(allele1, allele2);
-            PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || dropUnphased || isPhasedI == isPhased,
-                                        "Cannot convert VCF with mixed phasedness, unless forceUnphased or "
-                                        "dropUnphased is set, at variant position "
-                                            << position);
-            if (dropUnphased && !isPhasedI) {
-                skipVariant = true;
-                break;
-            }
-            const uint64_t ploidyI = (allele2 == NOT_DIPLOID) ? 1 : 2;
-            if (handlePloidy == PH_STRICT) {
-                PICOVCF_ASSERT_OR_MALFORMED(
-                    ploidyI == ploidy,
-                    "Will not convert VCF with mixed ploidy with PH_STRICT, see PloidyHandling options");
-            } else if (handlePloidy == PH_FORCE_DIPLOID) {
-                if (ploidyI != 2) {
-                    allele2 = allele1;
-                }
-            }
-            if (isPhased) {
-                if (allele1 == MISSING_VALUE) {
-                    missingData.push_back(sampleIndex);
-                } else if (allele1 > 0) {
-                    variantGtData.at(allele1 - 1).push_back(sampleIndex);
-                }
-                sampleIndex++;
-                if (ploidy == 2) {
-                    if (allele2 == MISSING_VALUE) {
-                        missingData.push_back(sampleIndex);
-                    } else if (allele2 > 0) {
-                        variantGtData.at(allele2 - 1).push_back(sampleIndex);
-                    }
-                    sampleIndex++;
-                }
-                // sampleIndex refers to _haploid samples_ for unphased data.
-            } else {
-                if (allele1 == MISSING_VALUE || allele2 == MISSING_VALUE) {
-                    missingData.push_back(sampleIndex);
-                } else if (allele1 == allele2 && allele1 > 0) {
-                    // This corresponds to a "2" (numCopies)
-                    variantGtData.at((allele1 - 1) + altAlleles.size()).push_back(sampleIndex);
-                } else {
-                    // These correspond to a "1" (numCopies). We can have two "1"s in the case where the
-                    // alt alleles are different. It is up to the downstream use-case how to handle this
-                    // (e.g., filter the lower frequency one out, adjust the calculation to handle it, etc.)
-                    if (allele1 > 0) {
-                        variantGtData.at(allele1 - 1).push_back(sampleIndex);
-                    }
-                    if (allele2 > 0) {
-                        variantGtData.at(allele2 - 1).push_back(sampleIndex);
-                    }
-                }
-                sampleIndex++; // sampleIndex refers to _individuals_ for unphased data.
-            }
-        }
-        if (skipVariant) {
+        const VCFPhasedness iPhasedness = variant1.getPhasedness();
+        PICOVCF_RELEASE_ASSERT(iPhasedness != PVCFP_UNKNOWN);
+        PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || dropUnphased || phasedness == iPhasedness,
+                                    "Cannot convert VCF with mixed phasedness, unless forceUnphased or "
+                                    "dropUnphased is set, at variant position "
+                                        << position);
+        if (dropUnphased && (iPhasedness != PVCFP_PHASED)) {
             continue;
+        }
+        const AlleleT iPloidy = variant.getMaxPloidy();
+        PICOVCF_RELEASE_ASSERT(genotypes.size() % iPloidy == 0);
+        const AlleleT usePloidy = (forceToPloidy > 0) ? forceToPloidy : iPloidy;
+        for (SampleT indivIndex = 0; indivIndex < genotypes.size() / iPloidy; indivIndex++) {
+            if (isPhased) {
+                for (size_t i = 0; i < iPloidy; i++) {
+                    if (forceToPloidy > 0 && i >= forceToPloidy) {
+                        continue;
+                    }
+                    const SampleT gtIndex = (indivIndex * iPloidy) + i;
+                    const AlleleT allele = genotypes[gtIndex];
+                    const SampleT sampleIndex = (indivIndex * usePloidy) + i;
+                    if (allele == MISSING_VALUE) {
+                        missingData.push_back(sampleIndex);
+                    } else if (allele == MIXED_PLOIDY) {
+                        if (forceToPloidy == 0) {
+                            throw ApiMisuse("Will not convert VCF with mixed ploidy unless forceToPloidy is used");
+                        } else {
+                            PICOVCF_ASSERT_OR_MALFORMED(gtIndex % iPloidy != 0,
+                                                        "Ploidy=0 individual found at variant @ pos = " << position);
+                            // This option just replaces all "not found ploidy" alleles with a copy of the first allele
+                            // from the individual.
+                            const AlleleT firstAllele = genotypes.at(indivIndex * iPloidy);
+                            if (firstAllele > 0) {
+                                variantGtData.at(firstAllele - 1).push_back(sampleIndex);
+                            }
+                        }
+                    } else if (allele > 0) {
+                        variantGtData.at(allele - 1).push_back(sampleIndex);
+                    }
+                }
+                for (size_t i = iPloidy; i < forceToPloidy; i++) {
+                    const SampleT sampleIndex = (indivIndex * usePloidy) + i;
+                    const AlleleT firstAllele = genotypes.at(indivIndex * iPloidy);
+                    if (firstAllele > 0) {
+                        variantGtData.at(firstAllele - 1).push_back(sampleIndex);
+                    }
+                }
+            } else {
+                if (iPloidy > 2) {
+                    throw ApiMisuse("VCF to IGD (unphased) only supports ploidy up to 2 currently.");
+                }
+                if (forceToPloidy > 0) {
+                    throw ApiMisuse(
+                        "Will not convert VCF with mixed ploidy for unphased data, even with forceToPloidy");
+                }
+                bool isMissing = false;
+                std::vector<size_t> counts(altAlleles.size());
+                for (size_t i = 0; i < iPloidy; i++) {
+                    const AlleleT allele = genotypes.at((indivIndex * iPloidy) + i);
+                    switch (allele) {
+                    case MISSING_VALUE: isMissing = true; break;
+                    case MIXED_PLOIDY:
+                        throw ApiMisuse("Will not convert VCF with mixed ploidy for unphased data");
+                        break;
+                    case 0: break;
+                    default:
+                        PICOVCF_RELEASE_ASSERT(allele > 0 && allele <= counts.size());
+                        counts[allele - 1]++;
+                        break;
+                    }
+                }
+                if (isMissing) {
+                    missingData.push_back(indivIndex);
+                }
+                for (size_t i = 0; i < counts.size(); i++) {
+                    // This corresponds to a "2" (numCopies)
+                    if (counts[i] == 2) {
+                        variantGtData.at(i + altAlleles.size()).push_back(indivIndex);
+                    } else if (counts[i] == 1) {
+                        variantGtData.at(i).push_back(indivIndex);
+                    }
+                }
+            }
         }
         std::string currentVariantId;
         if (emitVariantIds) {
@@ -2036,7 +2883,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
             // If provided, we call the callback for each "expanded" variant per the IGD format. This means
             // that multi-allelic sites, missing data rows, etc., will get multiple calls.
             if (variantCallback != nullptr) {
-                variantCallback(vcf, variant, callbackContext);
+                variantCallback(vcf.get(), variant, callbackContext);
             }
             writer.writeVariantSamples(outFile, position, ref, alt, variantGtData[altIndex], false, numCopies);
             if (!isPhased && ploidy > 1) {
@@ -2061,7 +2908,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
         }
         if (!missingData.empty()) {
             if (variantCallback != nullptr) {
-                variantCallback(vcf, variant, callbackContext);
+                variantCallback(vcf.get(), variant, callbackContext);
             }
             writer.writeVariantSamples(outFile, variant.getPosition(), variant.getRefAllele(), "", missingData, true);
             if (emitVariantIds) {
@@ -2072,7 +2919,7 @@ inline void vcfToIGD(const std::string& vcfFilename,
     writer.writeIndex(outFile);
     writer.writeVariantInfo(outFile);
     if (emitIndividualIds) {
-        writer.writeIndividualIds(outFile, vcf.getIndividualLabels());
+        writer.writeIndividualIds(outFile, vcf->getIndividualLabels());
     }
     if (emitVariantIds) {
         writer.writeVariantIds(outFile, variantIds);

@@ -29,43 +29,31 @@ int main(int argc, char* argv[]) {
     const std::string command(argv[1]);
     const std::string filename(argv[2]);
 
-    VCFFile vcf(filename);
+    // Open the VCF with the best available parser.
+    auto vcf = openVCFFile(filename);
 
     if (command == "stats") {
         std::cout << "Stats for " << filename << std::endl;
-        std::cout << "  Variants: " << vcf.numVariants() << std::endl;
-        std::cout << "  Individuals: " << vcf.numIndividuals() << std::endl;
-        std::cout << "  Version: " << vcf.getMetaInfo(VCFFile::META_FILE_FORMAT) << std::endl;
-        std::cout << "  Source: " << vcf.getMetaInfo("source") << std::endl;
-        std::cout << "  Genome range: " << vcf.getGenomeRange().first << "-" << vcf.getGenomeRange().second
+        std::cout << "  Variants: " << vcf->numVariants() << std::endl;
+        std::cout << "  Individuals: " << vcf->numIndividuals() << std::endl;
+        std::cout << "  Version: " << vcf->getMetaInfo(VCFFile::META_FILE_FORMAT) << std::endl;
+        std::cout << "  Source: " << vcf->getMetaInfo("source") << std::endl;
+        std::cout << "  Genome range: " << vcf->getGenomeRange().first << "-" << vcf->getGenomeRange().second
                   << std::endl;
-        vcf.seekBeforeVariants();
-        if (vcf.hasNextVariant()) {
-            vcf.nextVariant();
-            std::cout << "  Has genotype data? " << (vcf.currentVariant().hasGenotypeData() ? "yes" : "no")
+        if (vcf->nextVariant()) {
+            std::cout << "  Has genotype data? " << (vcf->currentVariant().hasGenotypeData() ? "yes" : "no")
                       << std::endl;
         }
     } else if (command == "matrix") {
         std::cout << "Rows: variants" << std::endl;
         std::cout << "Columns: samples" << std::endl;
         // This assumes/checks for phased data.
-        vcf.seekBeforeVariants();
-        while (vcf.hasNextVariant()) {
-            vcf.nextVariant();
-            VCFVariantView variant = vcf.currentVariant();
-            IndividualIteratorGT iterator = variant.getIndividualIterator();
-            while (iterator.hasNext()) {
-                VariantT allele1 = 0;
-                VariantT allele2 = 0;
-                bool isPhased = iterator.getAlleles(allele1, allele2);
-                if (!isPhased) {
-                    std::cerr << "Cannot create a matrix for unphased data" << std::endl;
-                    return 2;
-                }
-                emitAllele(allele1, std::cout);
-                if (allele2 != NOT_DIPLOID) {
-                    emitAllele(allele2, std::cout);
-                }
+        vcf->seekBeforeVariants();
+        while (vcf->nextVariant()) {
+            VCFVariantView& variant = vcf->currentVariant();
+            std::vector<AlleleT> gt = variant.getGenotypeArray();
+            for (const auto allele : gt) {
+                emitAllele(allele, std::cout);
             }
             std::cout << std::endl;
         }
