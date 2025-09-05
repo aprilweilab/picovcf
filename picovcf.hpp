@@ -1479,7 +1479,7 @@ public:
      */
     size_t numVariants() {
         if (m_variants == INTERNAL_VALUE_NOT_SET) {
-            scanVariants();
+            scanVariants(/*coundVariants=*/true);
         }
         return m_variants;
     }
@@ -1666,16 +1666,21 @@ protected:
         PICOVCF_ASSERT_OR_MALFORMED(sawHeader, "No header line (column names) found.");
     }
 
-    void scanVariants() {
-        m_variants = 0;
-        const bool computeRange = (m_genomeRange.first == INTERNAL_VALUE_NOT_SET);
-        if (computeRange) {
-            m_genomeRange.second = 0;
+    /**
+     * Scan all the variants to collect information. If countVariants is false, this can be done
+     * very quickly on an indexed VCF. Otherwise, it is pretty slow.
+     */
+    void scanVariants(bool countVariants = false) {
+        countVariants = countVariants || !isUsingIndex();
+        if (countVariants) {
+            m_variants = 0;
         }
         const auto originalPosition = getFilePosition();
         this->seekBeforeVariants();
+        bool skipToEnd = !countVariants;
+        m_genomeRange.second = 0;
         while (this->nextVariant()) {
-            const VCFVariantView& variant = this->currentVariant();
+            const VCFVariantView& variant = currentVariant();
             if (!useVariant(variant)) {
                 continue;
             }
@@ -1683,16 +1688,16 @@ protected:
             if (m_genomeRange.first == INTERNAL_VALUE_NOT_SET) {
                 m_genomeRange.first = position;
             }
-            if (isUsingIndex()) {
-                const auto virt = TabixIndexSequence::splitVirt(m_index->sequences().front().getLastVOffset());
-                m_infile->seek_block({virt.first, 0});
+            PICOVCF_ASSERT_OR_MALFORMED(m_genomeRange.second <= position,
+                                        "VCF rows must be in ascending genome position");
+            m_genomeRange.second = position;
+            if (countVariants) {
+                m_variants++;
             }
-            if (computeRange) {
-                PICOVCF_ASSERT_OR_MALFORMED(m_genomeRange.second <= position,
-                                            "VCF rows must be in ascending genome position");
-                m_genomeRange.second = position;
+            if (skipToEnd && isUsingIndex()) {
+                seekVirt(m_index->sequences().front().getLastVOffset());
+                skipToEnd = false;
             }
-            m_variants++;
         }
         setFilePosition(originalPosition);
     }

@@ -36,12 +36,19 @@ int main(int argc, char* argv[]) {
             const VCFVariantView& variant = vcf.currentVariant();
             std::cout << "Found variant: " << variant.getPosition() << "\n";
         }
-    } else if (command == "index") {
-        std::stringstream ss;
-        ss << filename << ".tbi";
-        TabixIndex index(ss.str());
-        const auto& seq = index.getSequence("22");
-        seq.lookupByBin(21906505, 21906506);
+    } else if (command == "fast_stats") {
+        // Count numVariants() is the slow part, so we leave that off!
+        std::cout << "Stats for " << filename << std::endl;
+        std::cout << "  Has index? " << (vcf.isUsingIndex() ? "yes" : "no") << std::endl;
+        std::cout << "  Individuals: " << vcf.numIndividuals() << std::endl;
+        std::cout << "  Version: " << vcf.getMetaInfo(VCFFile::META_FILE_FORMAT) << std::endl;
+        std::cout << "  Source: " << vcf.getMetaInfo("source") << std::endl;
+        std::cout << "  Genome range: " << vcf.getGenomeRange().first << "-" << vcf.getGenomeRange().second
+                  << std::endl;
+        if (vcf.nextVariant()) {
+            std::cout << "  Has genotype data? " << (vcf.currentVariant().hasGenotypeData() ? "yes" : "no")
+                      << std::endl;
+        }
     } else if (command == "stats") {
         std::cout << "Stats for " << filename << std::endl;
         std::cout << "  Has index? " << (vcf.isUsingIndex() ? "yes" : "no") << std::endl;
