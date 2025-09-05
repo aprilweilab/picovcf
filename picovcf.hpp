@@ -69,7 +69,8 @@ static constexpr size_t INTERNAL_VALUE_NOT_SET = std::numeric_limits<size_t>::ma
 static constexpr size_t MAX_PLOIDY = 8;
 
 /** The maximum base-pair position supported. */
-static constexpr size_t MAX_SUPPORTED_POSITION = std::numeric_limits<size_t>::max();
+static constexpr size_t INVALID_POSITION = std::numeric_limits<size_t>::max();
+static constexpr size_t MAX_SUPPORTED_POSITION = std::numeric_limits<size_t>::max() - 1;
 
 /**
  * Exception thrown when there is a problem reading the underlying file.
@@ -2523,6 +2524,8 @@ private:
  * (see callbackContext).
  * @param[in] callbackContext [Optional] Pointer to an object that will be passed to
  * variantCallback.
+ * @param[in] region [Optional] Only convert variants found within this range, which is
+ * a pair (start, end) where each position is inclusive.
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
@@ -2534,7 +2537,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      const size_t forceToPloidy = 0,
                      bool dropUnphased = false,
                      void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr,
-                     void* callbackContext = nullptr) {
+                     void* callbackContext = nullptr,
+                     const std::pair<size_t, size_t> region = {INVALID_POSITION, INVALID_POSITION}) {
     VCFFile vcf(vcfFilename);
 
     vcf.seekBeforeVariants();
@@ -2559,16 +2563,26 @@ inline void vcfToIGD(const std::string& vcfFilename,
     std::ofstream outFile(outFilename, std::ios::binary);
     IGDWriter writer(ploidy, vcf.numIndividuals(), isPhased);
     writer.writeHeader(outFile, vcfFilename, description);
-    vcf.seekBeforeVariants();
-    while (vcf.nextVariant()) {
+
+    bool alreadyHave = false;
+    if (region.first == INVALID_POSITION) {
+        vcf.seekBeforeVariants();
+    } else {
+        alreadyHave = vcf.lowerBoundPosition(region.first);
+    }
+    while (alreadyHave || vcf.nextVariant()) {
+        alreadyHave = false;
         VCFVariantView& variant = vcf.currentVariant();
+        const auto position = variant.getPosition();
+        if (position > region.second) {
+            break;
+        }
         std::vector<AlleleT> genotypes = variant.getGenotypeArray();
         auto altAlleles = variant.getAltAlleles();
         IGDSampleList missingData;
         const size_t numSampleLists = isPhased ? altAlleles.size() : (altAlleles.size() * ploidy);
         std::vector<IGDSampleList> variantGtData(numSampleLists);
         SampleT sampleIndex = 0;
-        const auto position = variant.getPosition();
         const VCFPhasedness iPhasedness = variant1.getPhasedness();
         PICOVCF_RELEASE_ASSERT(iPhasedness != PVCFP_UNKNOWN);
         PICOVCF_ASSERT_OR_MALFORMED(forceUnphased || dropUnphased || phasedness == iPhasedness,

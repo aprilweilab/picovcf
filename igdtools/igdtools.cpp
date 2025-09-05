@@ -385,10 +385,30 @@ int main(int argc, char* argv[]) {
     std::string description = outputDescription ? *outputDescription : "";
 
     try {
+        size_t bpStart = 0;
+        size_t bpEnd = std::numeric_limits<size_t>::max();
+        if (range) {
+            const char* rangec = range->c_str();
+            const char* rangecEnd = range->c_str() + range->size();
+            char* endptr = nullptr;
+            bpStart = std::strtoull(rangec, &endptr, 10);
+            if (endptr >= rangecEnd || *endptr != '-') {
+                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
+                return 1;
+            }
+            endptr++;
+            bpEnd = std::strtoull(endptr, &endptr, 10);
+            if (endptr != rangecEnd) {
+                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
+                return 1;
+            }
+            std::cout << "Restricting to base-pair range " << bpStart << " - " << bpEnd << " (inclusive)" << std::endl;
+        }
 
         const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
         if (isVcf) {
 
+            // FIXME: apply range to metadata export as well.
             if (!outfile) {
                 if (exportMetadata) {
                     std::string metadataOutDirectory = *infile;
@@ -408,7 +428,6 @@ int main(int argc, char* argv[]) {
                           << "Use --out to convert to IGD, and --export-metadata to export the metadata." << std::endl;
                 return 1;
             }
-            UNSUPPORTED_FOR_VCF(range, "--range");
             UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
             UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
             UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
@@ -449,7 +468,8 @@ int main(int argc, char* argv[]) {
                      forceToPloidy ? *forceToPloidy : 0,
                      dropUnphased,
                      variantCallback,
-                     callbackContext);
+                     callbackContext,
+                     {bpStart, bpEnd});
             return 0;
         } else {
             ONLY_SUPPORTED_FOR_VCF(forceToPloidy, "--force-ploidy");
@@ -459,26 +479,6 @@ int main(int argc, char* argv[]) {
 
         // Not a VCF, then assume it is IGD and load the header.
         IGDData igd(*infile);
-
-        size_t bpStart = 0;
-        size_t bpEnd = std::numeric_limits<size_t>::max();
-        if (range) {
-            const char* rangec = range->c_str();
-            const char* rangecEnd = range->c_str() + range->size();
-            char* endptr = nullptr;
-            bpStart = std::strtoull(rangec, &endptr, 10);
-            if (endptr >= rangecEnd || *endptr != '-') {
-                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
-                return 1;
-            }
-            endptr++;
-            bpEnd = std::strtoull(endptr, &endptr, 10);
-            if (endptr != rangecEnd) {
-                std::cerr << "Malformed range: " << *range << " (must be \"lower-upper\")" << std::endl;
-                return 1;
-            }
-            std::cout << "Restricting to base-pair range " << bpStart << " - " << bpEnd << " (inclusive)" << std::endl;
-        }
 
         double fLower = 0.0;
         double fUpper = 1.1;
