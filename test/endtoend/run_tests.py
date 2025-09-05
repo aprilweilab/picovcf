@@ -28,6 +28,31 @@ def quiet_del(filepath):
 
 
 class TestIgdTools(unittest.TestCase):
+    def test_subsample_igd(self):
+        run(["igdtools", input("msprime.example.vcf"), "--out", "msprime.example.igd"])
+        with open("test.subsample.txt", "w") as f:
+            f.write("\n".join(["tsk_100", "tsk_6", "tsk_63", "tsk_222"]))
+        run(["igdtools", "-S", "test.subsample.txt", "msprime.example.igd", "-o", "test.subsample.igd"])
+        result = run(["igdtools", "--individuals", "test.subsample.igd"])
+        self.assertEqual(
+            result.decode("utf-8").split("\n"),
+            ["0: tsk_100",
+             "1: tsk_6",
+             "2: tsk_63",
+             "3: tsk_222",
+             ""]
+        )
+        result = run(["igdtools", "--alleles", "test.subsample.igd"])
+        self.assertEqual(
+            result.decode("utf-8").split("\n"),
+            ["POSITION\tREF\tALT\tALT COUNT\tTOTAL",
+             "55829\tA\tG\t0\t8",
+             "56531\tA\tG\t1\t8",
+             "56554\tA\tT\t1\t8",
+             "56812\tG\tT\t0\t8",
+             ""]
+        )
+
     def test_unphased_from_igd(self):
         # unphased.example.vcf and msprime.example.vcf are identical, except that the former
         # has been manually "dephased" by changing | to /.
