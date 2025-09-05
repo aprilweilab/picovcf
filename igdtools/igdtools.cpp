@@ -314,11 +314,11 @@ int main(int argc, char* argv[]) {
                      "samples, sites, and variants.",
                      {'s', "stats"});
     args::Flag alleles(parser, "alleles", "Emit allele frequencies.", {'a', "alleles"});
-    args::Flag noIndividualIds(
-        parser, "noIndividualIds", "Do not emit IDs for individuals in the resulting IGD file.", {"no-indiv-ids"});
     args::Flag noVariantIds(
         parser, "noVariantIds", "Do not emit IDs for variants in the resulting IGD file.", {"no-var-ids"});
     args::ValueFlag<size_t> trimSamples(parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
+    args::ValueFlag<std::string> keepSamples(
+        parser, "keepSamples", "Keep samples listed in the given text file.", {'S', "samples"});
     args::Flag forceUnphasedArg(
         parser, "forceUnphased", "Force output file to be unphased, regardless of input.", {"force-unphased"});
     args::Flag dropMultiSites(
@@ -421,8 +421,8 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(dropMultiSites, "--drop-multi-sites");
             UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
             UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
+            UNSUPPORTED_FOR_VCF(keepSamples, "--samples");
 
-            const bool emitIndividualIds = !noIndividualIds;
             const bool emitVariantIds = !noVariantIds;
             const PloidyHandling hploidy = handlePloidy ? *handlePloidy : PH_STRICT;
 
@@ -445,7 +445,7 @@ int main(int argc, char* argv[]) {
                      *outfile,
                      description,
                      true,
-                     emitIndividualIds,
+                     /*emitIndividualIds=*/true,
                      emitVariantIds,
                      forceUnphasedArg,
                      hploidy,
@@ -505,15 +505,6 @@ int main(int argc, char* argv[]) {
         const uint64_t ploidy = igd.getPloidy();
         const size_t numSamples = igd.numSamples();
         size_t effectiveSampleCt = numSamples;
-        if (trimSamples) {
-            effectiveSampleCt = igd.isPhased() ? (ploidy * (*trimSamples)) : (*trimSamples);
-            if (effectiveSampleCt > numSamples) {
-                std::cerr << "--trim value is larger than the number of individuals" << std::endl;
-                return 2;
-            }
-            std::cout << "Trimming to " << effectiveSampleCt << (igd.isPhased() ? " haploid" : "") << " samples"
-                      << std::endl;
-        }
 
         if (info) {
             std::cout << "Header information for " << *infile << std::endl;
@@ -565,6 +556,54 @@ int main(int argc, char* argv[]) {
             std::cerr << "Cannot store data with ploidy " << ploidy << " as unphased" << std::endl;
             return 2;
         }
+
+        // Drop any individuals that are not kept, and map them to the order in the filter list.
+        std::vector<size_t> mapIndividual(igd.numIndividuals());
+        std::iota(mapIndividual.begin(), mapIndividual.end(), 0);
+        if (keepSamples) {
+            if (trimSamples) {
+                throw std::runtime_error("Cannot specify both --samples and --trim");
+            }
+            const auto& keepIndivs = readLines(*keepSamples);
+            std::unordered_map<std::string, size_t> keepMap;
+            size_t i = 0;
+            for (const auto& indiv : keepIndivs) {
+                if (!indiv.empty()) {
+                    keepMap.emplace(indiv, i++);
+                }
+            }
+            if (keepMap.empty()) {
+                throw std::runtime_error("Provided sample list is empty");
+            }
+            size_t discarded = 0;
+            const auto& allIndivs = igd.getIndividualIds();
+            for (size_t i = 0; i < allIndivs.size(); i++) {
+                const auto& findIt = keepMap.find(allIndivs[i]);
+                if (findIt == keepMap.end()) {
+                    mapIndividual.at(i) = std::numeric_limits<size_t>::max();
+                    discarded++;
+                } else {
+                    mapIndividual.at(i) = findIt->second;
+                }
+            }
+            const size_t keptIndivs = igd.numIndividuals() - discarded;
+            if (keptIndivs != keepMap.size()) {
+                std::cerr << "ERROR: Only kept " << keptIndivs << ", but sample list had " << keepMap.size()
+                          << std::endl;
+                return 2;
+            }
+            effectiveSampleCt = igd.isPhased() ? (ploidy * (keptIndivs)) : keptIndivs;
+        } else if (trimSamples) {
+            if (*trimSamples >= igd.numIndividuals()) {
+                std::cerr << "--trim value is larger than or equal to the number of individuals" << std::endl;
+                return 2;
+            }
+            for (size_t i = *trimSamples; i < igd.numIndividuals(); i++) {
+                mapIndividual.at(i) = std::numeric_limits<size_t>::max();
+            }
+            effectiveSampleCt = igd.isPhased() ? (ploidy * (*trimSamples)) : *trimSamples;
+        }
+
         std::shared_ptr<std::ofstream> igdOutfile;
         std::shared_ptr<IGDWriter> writer;
         const uint64_t numIndividuals = igd.isPhased() ? (effectiveSampleCt / ploidy) : effectiveSampleCt;
@@ -634,8 +673,32 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
-            std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
+
+            const size_t iDivisor = igd.isPhased() ? ploidy : 1;
+            auto filterSamples = [&](IGDSampleList& samples) {
+                size_t k = 0;
+                for (size_t j = 0; j < samples.size(); j++) {
+                    const size_t indiv = samples[j] / iDivisor;
+                    size_t hap = 0;
+                    if (igd.isPhased()) {
+                        hap = samples[j] % iDivisor;
+                    }
+                    const size_t mappedIndex = mapIndividual.at(indiv);
+                    if (mappedIndex != std::numeric_limits<size_t>::max()) {
+                        samples[k++] = (mappedIndex * iDivisor) + hap;
+                    }
+                }
+                if (k != samples.size()) {
+                    samples.resize(k);
+                }
+            };
+
+            if (!skipPosition.empty()) {
+                std::cerr << "Skipping " << skipPosition.size() << " sites due to filters" << std::endl;
+            }
+            if (skippedVars > 0) {
+                std::cerr << "Skipping " << skippedVars << " variants due to filters" << std::endl;
+            }
 
             // Number of variants, counted by by num_copies
             std::vector<size_t> variantsByCopy(igd.getPloidy() + 1, 0);
@@ -653,15 +716,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (pos >= bpStart && pos <= bpEnd) {
                     auto sampleList = igd.getSamplesWithAlt(i);
-                    if (trimSamples) {
-                        size_t j = 0;
-                        while (j < sampleList.size() && sampleList[j] < effectiveSampleCt) {
-                            j++;
-                        }
-                        if (j != sampleList.size()) {
-                            sampleList.resize(j);
-                        }
-                    }
+                    filterSamples(sampleList);
                     const auto sampleCt = sampleList.size();
                     assert(sampleCt <= effectiveSampleCt);
                     const double freq = (double)sampleCt / (double)effectiveSampleCt;
@@ -783,14 +838,21 @@ int main(int argc, char* argv[]) {
                 if (updateIndividualIds) {
                     idsToUse = readLines(*updateIndividualIds);
                 } else {
-                    idsToUse = igd.getIndividualIds();
+                    const auto& indivIds = igd.getIndividualIds();
+                    if (!indivIds.empty()) {
+                        idsToUse.resize(numIndividuals);
+                        for (size_t i = 0; i < indivIds.size(); i++) {
+                            const size_t mappedIndex = mapIndividual.at(i);
+                            if (mappedIndex != std::numeric_limits<size_t>::max()) {
+                                idsToUse.at(mappedIndex) = indivIds[i];
+                            }
+                        }
+                    }
                 }
-                if (!idsToUse.empty() && !noIndividualIds) {
-                    if (idsToUse.size() < numIndividuals) {
+                if (!idsToUse.empty()) {
+                    if (idsToUse.size() != numIndividuals) {
                         throw MalformedFile("Input file has invalid number of individual IDs");
                     }
-                    // Right now we only support truncation of samples (not random removal), so this is ok.
-                    idsToUse.resize(numIndividuals);
                     writer->writeIndividualIds(*igdOutfile, idsToUse);
                 }
                 if (!newVariantIds.empty() && !noVariantIds) {
