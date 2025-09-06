@@ -1110,6 +1110,15 @@ public:
         return std::move(result);
     }
 
+    /**
+     * Get an array (std::vector) of allele values per haploid, where the alleles for an individual
+     * are gruoped together (consecutive) based on maxPloidy. The maxPloidy can be retrieved via
+     * getMaxPloidy(), and can differ for each Variant, but is the same within a variant. When an
+     * individual has missing data for an allele, the value is picovcf::MISSING_DATA, and when their
+     * ploidy is less than maxPloidy, the remaining alleles are filled in with picovcf::MIXED_PLOIDY.
+     *
+     * @return A std::vector of allele values. Size will always be maxPloidy * numIndividuals.
+     */
     std::vector<AlleleT> getGenotypeArray() {
         m_phased.clear();
         m_phased.resize(m_numIndividuals, true); // Phased until proven otherwise
@@ -1204,7 +1213,7 @@ public:
      * @returns An IndividualIteratorGT for efficiently accessing the genotype
      * data.
      */
-    IndividualIteratorGT getIndividualIterator() const {
+    IndividualIteratorGT getIndividualIterator() const PICOVCF_DEPRECATED {
         if (!hasGenotypeData()) {
             PICOVCF_THROW_ERROR(ApiMisuse, "Cannot iterate individuals when there is no genotype data");
         }
