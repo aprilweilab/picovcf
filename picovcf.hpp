@@ -568,6 +568,12 @@ private:
 };
 #endif
 
+// The paper, format PDF, etc., are all very vague about this. They say "16kb" per index, which is
+// related to base-pairs, but in reality it is 2^14, which is 16384. Props to the authors of libStatGen
+// where I finally found some very clear code showing the linear index divisor.
+static constexpr size_t TABIX_LINDEX_SHIFT = 14;
+
+#if VCF_GZ_SUPPORT
 struct TabixHeader {
     char magic[4];
     int32_t numSequences;
@@ -575,7 +581,7 @@ struct TabixHeader {
     int32_t colSeq;
     int32_t colBeg;
     int32_t colEnd;
-    int32_t meta; // Number of characters in comment lines
+    int32_t meta; // Leading character for comment lines (always #)
     int32_t skip; // Number of lines to skip at the beginning
     int32_t nameLengths;
 };
@@ -620,7 +626,7 @@ public:
             }
             m_bins.emplace(binNum, std::move(chunkList));
         }
-        // We read this, but don't use the linear index (it )
+        // The linear index
         const int32_t numIntervals = readOrDie<int32_t>(reader);
         for (size_t j = 0; j < numIntervals; j++) {
             m_linear.emplace_back(readOrDie<uint64_t>(reader));
@@ -728,6 +734,7 @@ public:
         const bool isBEDIndexing = (header.format & 0x10000);
         PICOVCF_ASSERT_OR_MALFORMED(!isBEDIndexing, "Unsupported BED-style indexing");
         PICOVCF_ASSERT_OR_MALFORMED((header.format & 0xFFFF) == 2, "Tabix index is not for a VCF file");
+        PICOVCF_ASSERT_OR_MALFORMED(header.meta == '#', "Tabix index is not for a VCF file (meta character is not #)");
 
         // Read sequence names.
         std::vector<char> namesv(header.nameLengths, 0);
@@ -778,6 +785,7 @@ private:
     ZBufferedReader m_reader;
     std::vector<TabixIndexSequence> m_sequences;
 };
+#endif
 
 // See if the current or next character we read will be EOF
 inline bool picovcf_peek_eof(BufferedReader* instream) { return instream->eof() || instream->peek_eof(); }
@@ -1313,6 +1321,7 @@ public:
         }
         parseHeader();
 
+#if VCF_GZ_SUPPORT
         try {
             std::stringstream indexFilename;
             indexFilename << filename << ".tbi";
@@ -1320,6 +1329,7 @@ public:
         } catch (FileReadError& error) {
             ; // TODO: optional warning if verbose
         }
+#endif
 
         m_currentVariant.initialize(numIndividuals());
         initContigs(contig);
@@ -1368,7 +1378,13 @@ public:
      *
      * @return true if an index is being used.
      */
-    bool isUsingIndex() const { return (bool)m_index; }
+    bool isUsingIndex() const {
+#if VCF_GZ_SUPPORT
+        return (bool)m_index;
+#else
+        return false;
+#endif
+    }
 
     /**
      * Seek to the first variant greater than or equal to the given position.
@@ -1379,47 +1395,19 @@ public:
      * we are interested in a single position.
      */
     bool lowerBoundPosition(size_t position) {
+#if VCF_GZ_SUPPORT
         if (!isUsingIndex()) {
+#endif
             this->seekBeforeVariants();
+#if VCF_GZ_SUPPORT
         } else {
             // TODO: add contig support!
             const auto& seq = m_index->sequences().front();
-
-            // Binary search for the first block that has a start position greater than or
-            // equal to our query, then seek to the block prior (if one exists).
-            ssize_t blockIndex = -1;
-            ssize_t low = 0;
-            ssize_t high = seq.linear().size() - 1;
-            ssize_t mid = high;
-            while (low <= high) {
-                mid = low + ((high - low) / 2);
-                seekVirt(seq.linear().at(mid));
-                PICOVCF_ASSERT_OR_MALFORMED(nextVariant(), "BGZF block has no variants");
-                const VCFVariantView& variant = this->currentVariant();
-                const size_t midPos = variant.getPosition();
-                if (midPos < position) {
-                    low = mid + 1;
-                } else if (midPos > position) {
-                    high = mid - 1;
-                } else {
-                    // Exact match to our position.
-                    blockIndex = mid;
-                    break;
-                }
-            }
-            if (blockIndex < 0) {
-                blockIndex = low;
-            }
-            // We need to start the search at a block before the one we found above.
-            size_t blockStart = std::numeric_limits<size_t>::max();
-            do {
-                seekVirt(seq.linear().at(blockIndex));
-                PICOVCF_ASSERT_OR_MALFORMED(nextVariant(), "BGZF block has no variants");
-                const VCFVariantView& variant = this->currentVariant();
-                blockStart = variant.getPosition();
-                blockIndex--;
-            } while (blockStart >= position && blockIndex >= 0);
+            size_t blockIndex = static_cast<size_t>(position >> TABIX_LINDEX_SHIFT);
+            blockIndex = std::min<size_t>(blockIndex, seq.linear().size() - 1);
+            seekVirt(seq.linear().at(blockIndex));
         }
+#endif
         bool found = false;
         while ((found = nextVariant())) {
             if (currentVariant().getPosition() >= position) {
@@ -1590,6 +1578,13 @@ public:
     VCFVariantView& currentVariant() { return m_currentVariant; }
 
 protected:
+#if VCF_GZ_SUPPORT
+    void seekVirt(const uint64_t virtOffset) {
+        const auto virt = TabixIndexSequence::splitVirt(virtOffset);
+        m_infile->seek_block({virt.first, virt.second});
+    }
+#endif
+
     inline bool useVariant(const VCFVariantView& variant) const {
         switch (m_contigHandling) {
         case PVCH_ONE:
@@ -1602,11 +1597,6 @@ protected:
         case PVCH_ALL:
         default: return true;
         }
-    }
-
-    void seekVirt(const uint64_t virtOffset) {
-        const auto virt = TabixIndexSequence::splitVirt(virtOffset);
-        m_infile->seek_block({virt.first, virt.second});
     }
 
     VCFVariantView& getFirstVariantUnfiltered() {
@@ -1695,10 +1685,12 @@ protected:
             if (countVariants) {
                 m_variants++;
             }
+#if VCF_GZ_SUPPORT
             if (skipToEnd && isUsingIndex()) {
                 seekVirt(m_index->sequences().front().getLastVOffset());
                 skipToEnd = false;
             }
+#endif
         }
         setFilePosition(originalPosition);
     }
@@ -1710,8 +1702,10 @@ protected:
     RangePair m_genomeRange;
     // Starting position (offset) in the file for the variants information
     FileOffset m_posVariants;
+#if VCF_GZ_SUPPORT
     // The (optional) Tabix index.
     std::unique_ptr<TabixIndex> m_index;
+#endif
 
     // Metadata dictionary
     std::multimap<std::string, std::string> m_metaInformation;

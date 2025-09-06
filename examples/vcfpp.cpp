@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
     VCFFile vcf(filename);
 
     if (command == "test") {
-        if (vcf.lowerBoundPosition(20304045)) {
+        if (vcf.lowerBoundPosition(10000000000)) {
             const VCFVariantView& variant = vcf.currentVariant();
             std::cout << "Found variant: " << variant.getPosition() << "\n";
         }
