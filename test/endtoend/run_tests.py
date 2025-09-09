@@ -28,6 +28,23 @@ def quiet_del(filepath):
 
 
 class TestIgdTools(unittest.TestCase):
+    def test_merge_igd(self):
+        run(["igdtools", input("msprime.example.vcf"), "--out", "msprime.example.igd"])
+        run(["igdtools", "msprime.example.igd", "-r", "55829-56531", "-o", "test.merge.pt1.igd"])
+        run(["igdtools", "msprime.example.igd", "-r", "56554-56812", "-o", "test.merge.pt2.igd"])
+        run(["igdtools", "test.merge.pt2.igd", "--merge", "test.merge.pt1.igd", "-o", "test.merged.igd"])
+        result = run(["igdtools", "--alleles", "test.merged.igd"])
+        self.assertEqual(
+            result.decode("utf-8").split("\n"),
+            ["POSITION\tREF\tALT\tALT COUNT\tTOTAL",
+             "55829\tA\tG\t90\t20000",
+             "56531\tA\tG\t329\t20000",
+             "56554\tA\tT\t150\t20000",
+             "56812\tG\tT\t131\t20000",
+             ""]
+        )
+
+
     def test_subsample_igd(self):
         run(["igdtools", input("msprime.example.vcf"), "--out", "msprime.example.igd"])
         with open("test.subsample.txt", "w") as f:

@@ -1,6 +1,7 @@
 #ifndef PICOVCF_HPP
 #define PICOVCF_HPP
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cctype>
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <zconf.h>
 
 #if VCF_GZ_SUPPORT
 #include <zlib.h>
@@ -1148,6 +1150,14 @@ public:
             currentValue = MIXED_PLOIDY;
         };
 
+        bool nonGTData = false;
+#define GT_ONLY_OP(stmt)                                                                                               \
+    do {                                                                                                               \
+        if (!nonGTData) {                                                                                              \
+            stmt;                                                                                                      \
+        }                                                                                                              \
+    } while (0)
+
         for (size_t i = m_nonGTPositions[POS_FORMAT_END] + 1; i < m_currentLine.size(); i++) {
             switch (m_currentLine[i]) {
             case '\t':
@@ -1155,18 +1165,20 @@ public:
                 processAllele();
                 currentPloidy = 1;
                 currentIndiv++;
+                nonGTData = false;
             } break;
-            case '0': currentValue = (currentValue == MIXED_PLOIDY) ? 0 : (currentValue * 10); break;
-            case '1': currentValue = (currentValue == MIXED_PLOIDY) ? 1 : ((currentValue * 10) + 1); break;
-            case '2': currentValue = (currentValue == MIXED_PLOIDY) ? 2 : ((currentValue * 10) + 2); break;
-            case '3': currentValue = (currentValue == MIXED_PLOIDY) ? 3 : ((currentValue * 10) + 3); break;
-            case '4': currentValue = (currentValue == MIXED_PLOIDY) ? 4 : ((currentValue * 10) + 4); break;
-            case '5': currentValue = (currentValue == MIXED_PLOIDY) ? 5 : ((currentValue * 10) + 5); break;
-            case '6': currentValue = (currentValue == MIXED_PLOIDY) ? 6 : ((currentValue * 10) + 6); break;
-            case '7': currentValue = (currentValue == MIXED_PLOIDY) ? 7 : ((currentValue * 10) + 7); break;
-            case '8': currentValue = (currentValue == MIXED_PLOIDY) ? 8 : ((currentValue * 10) + 8); break;
-            case '9': currentValue = (currentValue == MIXED_PLOIDY) ? 9 : ((currentValue * 10) + 9); break;
-            case '.': currentValue = MISSING_VALUE; break;
+            case '0': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 0 : (currentValue * 10)); break;
+            case '1': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 1 : ((currentValue * 10) + 1)); break;
+            case '2': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 2 : ((currentValue * 10) + 2)); break;
+            case '3': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 3 : ((currentValue * 10) + 3)); break;
+            case '4': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 4 : ((currentValue * 10) + 4)); break;
+            case '5': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 5 : ((currentValue * 10) + 5)); break;
+            case '6': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 6 : ((currentValue * 10) + 6)); break;
+            case '7': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 7 : ((currentValue * 10) + 7)); break;
+            case '8': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 8 : ((currentValue * 10) + 8)); break;
+            case '9': GT_ONLY_OP(currentValue = (currentValue == MIXED_PLOIDY) ? 9 : ((currentValue * 10) + 9)); break;
+            case '.': GT_ONLY_OP(currentValue = MISSING_VALUE); break;
+            case ':': nonGTData = true; break;
             case '|':
                 if (m_phasedness == PVCFP_UNKNOWN) {
                     m_phasedness = PVCFP_PHASED;
@@ -1188,6 +1200,7 @@ public:
             } break;
             }
         }
+#undef GT_ONLY_OP
         if (currentValue != MIXED_PLOIDY) {
             processAllele();
         }
@@ -1752,6 +1765,25 @@ static inline std::string readString(const uint64_t version, std::istream& inStr
     return std::move(strValue);
 }
 
+static inline void copyBytes(std::istream& inStream, std::ostream& outStream, size_t byteSize) {
+    constexpr size_t bufferSize = 32 * 1024 * 1024;
+    // XXX should probably heap allocate this directly.
+    static uint8_t buffer[bufferSize];
+    size_t written = 0;
+    while (written < byteSize) {
+        const size_t toRead = std::min(byteSize - written, bufferSize);
+        inStream.read(reinterpret_cast<char*>(&buffer[0]), toRead);
+        const size_t amountRead = inStream.gcount();
+        outStream.write(reinterpret_cast<char*>(&buffer[0]), amountRead);
+        written += amountRead;
+        PICOVCF_RELEASE_ASSERT(outStream.good());
+        if (!inStream.good()) {
+            break;
+        }
+    }
+    PICOVCF_RELEASE_ASSERT(written == byteSize);
+}
+
 /** Vector of sample indexes (IDs) */
 using IGDSampleList = std::vector<SampleT>;
 
@@ -2129,11 +2161,10 @@ public:
             const SampleT readAmount = picovcf_div_ceiling<SampleT, 8>(numSamples);
             PICOVCF_RELEASE_ASSERT(readAmount > 0);
             std::unique_ptr<uint8_t[]> buffer(new uint8_t[readAmount]);
-            if (buffer) {
-                m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
-                PICOVCF_GOOD_OR_API_MISUSE(m_infile);
-                return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples);
-            }
+            PICOVCF_RELEASE_ASSERT(buffer != nullptr);
+            m_infile.read(reinterpret_cast<char*>(buffer.get()), readAmount);
+            PICOVCF_GOOD_OR_API_MISUSE(m_infile);
+            return ::picovcf::getSamplesWithAlt((const uint8_t*)buffer.get(), numSamples);
         }
         return {};
     }
@@ -2157,6 +2188,11 @@ public:
         }
         return std::move(result);
     }
+
+    /**
+     * @return true if this file has identifiers for variants.
+     */
+    bool hasVariantIds() const { return 0 != m_header.filePosVariantIds; }
 
     /**
      * Read the (optional) list of variant identifiers from the file.
@@ -2269,6 +2305,9 @@ private:
     std::vector<IGDAllele> m_alternateAlleles;
     // Separate vector for storing the "long" alleles (larger than 4 nucleotides)
     std::vector<std::string> m_longAlleles;
+
+    friend void
+    mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description);
 };
 
 template <typename T> static inline void writeScalar(T intValue, std::ostream& outStream) {
@@ -2504,7 +2543,189 @@ private:
     std::vector<std::string> m_referenceAlleles;
     std::vector<std::string> m_alternateAlleles;
     std::vector<IGDData::IndexEntry> m_index;
+
+    friend void
+    mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description);
 };
+
+/**
+ * Merge the IGD files given by a list of IGDReader into a single output stream. The
+ * input files must be _mutually exclusive_ by genome range, such that if one
+ * input covers variants over the range (R1, R2) and another covers (R3, R4) then either
+ * R1 >= R4 or R3 >= R2. The samples described by the inputs must also be identical.
+ *
+ * If only some input IGDs have variant IDs, the remaining variants will get the empty string
+ * for their identifiers.
+ * The individual IDs will be used from the first (ascending order genetic position) input IGD
+ * and will not be checked against other IGD files individual IDs.
+
+ * @param out_file: The filename to write the output IGD to.
+ * @param in_readers: List of IGDReader objects for the input IGDs to be merged.
+ * @param force_overwrite: Optional. Set to True to always write the output file, even if it
+ *      already exists.
+ * @param description: Optional. Description to write to the IGD header. If not specified (None)
+ *      then the description of the first input IGD will be used.
+ */
+inline void
+mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description = {}) {
+    if (inputFilenames.size() < 2) {
+        PICOVCF_THROW_ERROR(ApiMisuse, "No point in merging fewer than 2 IGD files");
+    }
+
+    std::vector<IGDData> readers;
+    for (const auto& filename : inputFilenames) {
+        readers.emplace_back(filename);
+    }
+
+    // Sanity check that properties of inputs are consistent.
+    const size_t ploidy = readers.front().getPloidy();
+    const size_t numIndiv = readers.front().numIndividuals();
+    const bool phased = readers.front().isPhased();
+    std::string source = readers.front().getSource();
+    const std::string& useDesc = description.empty() ? readers.front().getDescription() : description;
+    bool writeVarIds = false;
+    {
+        std::vector<IGDData> useReaders;
+        for (auto& reader : readers) {
+            if (reader.getPloidy() != ploidy) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Multiple ploidy values in input IGDs");
+            }
+            if (reader.numIndividuals() != numIndiv) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Different sample set sizes in input IGDs");
+            }
+            if (reader.isPhased() != phased) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Different phasedness in input IGDs");
+            }
+            if (reader.hasVariantIds()) {
+                writeVarIds = true;
+            }
+            if (reader.numVariants() > 0) {
+                useReaders.push_back(std::move(reader));
+            }
+        }
+        readers = std::move(useReaders);
+    }
+    if (readers.empty()) {
+        PICOVCF_THROW_ERROR(ApiMisuse, "No IGD files had variants, cannot merge");
+    }
+
+    // Now sort the input readers according to their first variant, and then ensure no overlap.
+    auto positionOrder = [&](IGDData& first, IGDData& second) { return first.getPosition(0) < second.getPosition(0); };
+    std::sort(readers.begin(), readers.end(), positionOrder);
+    for (size_t i = 1; i < readers.size(); i++) {
+        auto& prev = readers[i - 1];
+        auto& curr = readers[i];
+        if (prev.getPosition(prev.numVariants() - 1) > curr.getPosition(curr.numVariants() - 1)) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "Overlapping input IGDs");
+        }
+    }
+
+    // Given an IGD input and a variant index, get the associated file offset and encoded genomic position
+    auto getOffsetForVariant = [&](IGDData& reader, size_t index) {
+        bool endOffset = false;
+        if (index == reader.numVariants()) {
+            index = reader.numVariants() - 1;
+            endOffset = true;
+        }
+        reader.m_infile.seekg(reader.getVariantIndexOffset(index));
+        PICOVCF_GOOD_OR_API_MISUSE(reader.m_infile);
+        IGDData::IndexEntry indexDatum;
+        reader.m_infile.read(reinterpret_cast<char*>(&indexDatum), sizeof(indexDatum));
+        if (endOffset) {
+            const bool isSparse = (bool)(indexDatum.bpPosition & IGDData::BP_POS_FLAGS_SPARSE);
+            size_t byteCount = 0;
+            if (isSparse) {
+                reader.m_infile.seekg(indexDatum.filePosDataRow);
+                byteCount = (readScalar<SampleT>(reader.m_infile) * sizeof(SampleT)) + sizeof(SampleT);
+            } else {
+                byteCount = picovcf_div_ceiling<SampleT, 8>(reader.numSamples());
+            }
+            return std::pair<uint64_t, uint64_t>{indexDatum.filePosDataRow + byteCount, indexDatum.bpPosition};
+        }
+        return std::pair<uint64_t, uint64_t>{indexDatum.filePosDataRow, indexDatum.bpPosition};
+    };
+
+    auto writer = IGDWriter(ploidy, numIndiv, phased);
+    // We interpret as little as possible from the input IGDs, to speed up the merging.
+    // The order of the resulting file looks like this:
+    //   HEADER
+    writer.writeHeader(outputStream, source, useDesc);
+
+    //   SAMPLE LISTS (input 1)   <-- offset1
+    //   ...
+    //   SAMPLE LISTS (input N)   <-- offsetN
+    std::vector<size_t> oldOffsets;
+    std::vector<size_t> newOffsets;
+    for (auto& reader : readers) {
+        const auto startPair = getOffsetForVariant(reader, 0);
+        const auto endPair = getOffsetForVariant(reader, reader.numVariants());
+        PICOVCF_RELEASE_ASSERT(endPair.first > startPair.first);
+        const size_t byteSize = endPair.first - startPair.first;
+        reader.m_infile.seekg(startPair.first);
+        oldOffsets.emplace_back(startPair.first);
+        newOffsets.emplace_back(outputStream.tellp());
+        copyBytes(reader.m_infile, outputStream, byteSize);
+        writer.m_header.numVariants += reader.numVariants();
+    }
+
+    //   INDEX + offset1 (input1)
+    //   ...
+    //   INDEX + offsetN (inputN)
+    writer.m_header.filePosIndex = outputStream.tellp();
+    PICOVCF_RELEASE_ASSERT(readers.size() == oldOffsets.size());
+    PICOVCF_RELEASE_ASSERT(readers.size() == newOffsets.size());
+    for (size_t i = 0; i < readers.size(); i++) {
+        auto& reader = readers[i];
+        const size_t oldOffset = oldOffsets[i];
+        const size_t newOffset = newOffsets[i];
+        for (size_t j = 0; j < reader.numVariants(); j++) {
+            const auto inputPair = getOffsetForVariant(reader, j);
+            writeScalar<uint64_t>(inputPair.second, outputStream);
+            writeScalar<uint64_t>((inputPair.first - oldOffset) + newOffset, outputStream);
+        }
+    }
+
+    //   VARIANT INFO (input1)
+    //   ...
+    //   VARIANT INFO (inputN)
+    writer.m_header.filePosVariants = outputStream.tellp();
+    for (auto& reader : readers) {
+        reader.m_infile.seekg(reader.m_header.filePosVariants);
+        for (size_t i = 0; i < reader.numVariants(); i++) {
+            const auto ref = readString(reader.m_header.version, reader.m_infile);
+            const auto alt = readString(reader.m_header.version, reader.m_infile);
+            writeString(ref, outputStream);
+            writeString(alt, outputStream);
+        }
+    }
+
+    //   INDIVIDUAL IDS (input1) -- optional
+    {
+        const auto& indivIds = readers.front().getIndividualIds();
+        writer.writeIndividualIds(outputStream, indivIds);
+    }
+
+    //   VARIANT IDS (input1)
+    //   ...
+    //   VARIANT IDS (inputN)
+    if (writeVarIds) {
+        writer.m_header.filePosVariantIds = outputStream.tellp();
+        writeScalar<uint64_t>(writer.m_header.numVariants, outputStream);
+        for (auto& reader : readers) {
+            auto vids = reader.getVariantIds();
+            if (vids.size() < reader.numVariants()) {
+                PICOVCF_ASSERT_OR_MALFORMED(vids.empty(), "IGD input file has unexpected number of variant IDs");
+                vids.resize(reader.numVariants(), "");
+            }
+            for (const auto& identifier : vids) {
+                writeString(identifier, outputStream);
+            }
+        }
+    }
+
+    outputStream.seekp(0);
+    writer.writeHeader(outputStream, source, useDesc);
+}
 
 /**
  * Using minimal memory, convert the given VCF file (can be gzipped) to an IGD
