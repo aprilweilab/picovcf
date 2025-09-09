@@ -7,9 +7,13 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <list>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <sys/stat.h>
 
@@ -43,6 +47,75 @@ static const std::string METADATA_FIELDS[] = {
 // a C-style array here.
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 static_assert(ARRAY_SIZE(METADATA_FIELDS) == (size_t)MetadataFields::MDF_INFO + 1, "Enum/string mismatch");
+
+/**
+ * Conceptually similar to the Python multiprocessing.Pool, except using threads instead of processes.
+ * All of the work must be added to the queue (via addWork) _prior_ to calling doAllWork. This is essentially
+ * just a way to batch a bunch of known work.
+ */
+template <typename T, typename O> class PooledJobs {
+public:
+    PooledJobs() = default;
+    virtual ~PooledJobs() = default;
+
+    PooledJobs(PooledJobs& rhs) = delete;
+    PooledJobs(PooledJobs&& rhs) = delete;
+    PooledJobs& operator=(PooledJobs& rhs) = delete;
+    PooledJobs& operator=(PooledJobs&& rhs) = delete;
+
+    void addWork(T item) {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_queue.push_back(std::move(item));
+    }
+
+    void doAllWork(size_t jobs) {
+        if (jobs == 1) {
+            while (!m_queue.empty()) {
+                T nextItem = std::move(m_queue.front());
+                m_queue.pop_front();
+                m_results.push_back(processItem(std::move(nextItem)));
+            }
+        } else {
+            std::vector<std::thread> threadPool;
+            for (size_t i = 0; i < jobs; i++) {
+                threadPool.emplace_back(&PooledJobs::workerMethod, this);
+            }
+            for (size_t i = 0; i < jobs; i++) {
+                threadPool[i].join();
+            }
+        }
+    }
+
+    const std::list<O>& getResults() { return m_results; }
+
+protected:
+    // The worker (a single thread) loops until the queue is empty.
+    void workerMethod() {
+        while (true) {
+            T nextItem; // T needs a default constructor.
+            {
+                std::lock_guard<std::mutex> lock(m_queueMutex);
+                if (m_queue.empty()) {
+                    break;
+                }
+                nextItem = std::move(m_queue.front());
+                m_queue.pop_front();
+            }
+            O output = processItem(std::move(nextItem));
+            {
+                std::lock_guard<std::mutex> lock(m_queueMutex);
+                m_results.push_back(std::move(output));
+            }
+        }
+    }
+
+    virtual O processItem(T item) = 0;
+
+private:
+    std::mutex m_queueMutex;
+    std::list<T> m_queue;
+    std::list<O> m_results;
+};
 
 inline void emitAllele(VariantT alleleIndex, std::ostream& out) {
     if (alleleIndex == MISSING_VALUE) {
@@ -273,21 +346,128 @@ void writeNextVariant(const VCFFile& vcfFile, VCFVariantView& variant, void* con
     }
 }
 
-// Given a VCF file, just emit the metadata from it, don't convert it to IGD.
-void vcfExportMetadata(const std::string& vcfFilename,
-                       const std::string& metadataOutDirectory,
-                       const std::string& metadataFieldList) {
-    VCFFile vcf(vcfFilename);
+struct VCFExportMetaJob {
+    picovcf::RangePair range;
+    std::string vcfFilename;
+    std::string metadataOutDirectory;
+    std::string metadataFieldList;
+};
 
-    MetadataWriteInfo writeInfo(metadataOutDirectory, metadataFieldList);
+class VCFExportWorker : public PooledJobs<VCFExportMetaJob, bool> {
+public:
+    // Given a VCF file, just emit the metadata from it, don't convert it to IGD.
+    static void vcfExportMetadata(const picovcf::RangePair& range,
+                                  const std::string& vcfFilename,
+                                  const std::string& metadataOutDirectory,
+                                  const std::string& metadataFieldList) {
+        VCFFile vcf(vcfFilename);
 
-    vcf.seekBeforeVariants();
-    while (vcf.nextVariant()) {
-        VCFVariantView& variant = vcf.currentVariant();
-        for (size_t i = 0; i < variant.getAltAlleles().size(); i++) {
-            writeNextVariant(vcf, variant, &writeInfo);
+        MetadataWriteInfo writeInfo(metadataOutDirectory, metadataFieldList);
+
+        bool alreadyHave = false;
+        if (range.first == INVALID_POSITION) {
+            vcf.seekBeforeVariants();
+        } else {
+            alreadyHave = vcf.lowerBoundPosition(range.first);
+        }
+        while (alreadyHave || vcf.nextVariant()) {
+            alreadyHave = false;
+            VCFVariantView& variant = vcf.currentVariant();
+            const auto position = variant.getPosition();
+            if (position > range.second) {
+                break;
+            }
+            for (size_t i = 0; i < variant.getAltAlleles().size(); i++) {
+                writeNextVariant(vcf, variant, &writeInfo);
+            }
         }
     }
+
+protected:
+    bool processItem(VCFExportMetaJob job) override {
+        vcfExportMetadata(job.range, job.vcfFilename, job.metadataOutDirectory, job.metadataFieldList);
+        return true;
+    }
+};
+
+struct VCFConvertJob {
+    size_t jobId;
+    std::string vcfFilename;
+    std::string igdFilename;
+    std::string description;
+    std::string exportList;
+    bool emitVariantIds;
+    bool forceUnphased;
+    size_t forceToPloidy;
+    bool dropUnphased;
+    picovcf::RangePair range;
+};
+
+class VCFConvertWorker : public PooledJobs<VCFConvertJob, std::string> {
+public:
+    static std::string vcfConvert(const VCFConvertJob& job) {
+        void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr;
+        void* callbackContext = nullptr;
+
+        std::unique_ptr<MetadataWriteInfo> writeInfo;
+        if (!job.exportList.empty()) {
+            std::string metadataOutDirectory = job.igdFilename;
+            if (ends_with(metadataOutDirectory, ".igd")) {
+                metadataOutDirectory = removeExt(metadataOutDirectory);
+            }
+            std::stringstream ssMDOut;
+            ssMDOut << metadataOutDirectory << ".meta";
+            if (job.jobId > 0) {
+                ssMDOut << job.jobId;
+            }
+            std::cout << "Exporting metadata to directory: " << ssMDOut.str() << std::endl;
+
+            writeInfo.reset(new MetadataWriteInfo(ssMDOut.str(), job.exportList));
+            variantCallback = writeNextVariant;
+            callbackContext = writeInfo.get();
+        }
+        std::stringstream outFilename;
+        outFilename << job.igdFilename;
+        if (job.jobId > 0) {
+            outFilename << "." << job.jobId;
+        }
+        vcfToIGD(job.vcfFilename,
+                 outFilename.str(),
+                 job.description,
+                 true,
+                 /*emitIndividualIds=*/true,
+                 job.emitVariantIds,
+                 job.forceUnphased,
+                 job.forceToPloidy,
+                 job.dropUnphased,
+                 variantCallback,
+                 callbackContext,
+                 job.range);
+        return outFilename.str();
+    }
+
+protected:
+    std::string processItem(VCFConvertJob job) override { return vcfConvert(job); }
+};
+
+std::vector<picovcf::RangePair> getRangesForJobs(const std::string& vcfFilename, size_t numJobs) {
+    picovcf::VCFFile vcf(vcfFilename);
+    picovcf::RangePair fileBPRange = vcf.getGenomeRange();
+    const size_t span = fileBPRange.second - fileBPRange.first;
+    const size_t perPart = (span + (numJobs - 1)) / numJobs;
+    if (perPart < 100 || numJobs == 1) {
+        return {fileBPRange};
+    }
+    if (!vcf.isUsingIndex()) {
+        std::cerr << "WARNING: Parallel processing a VCF file without a tabix index is NOT recommended" << std::endl;
+    }
+    std::vector<picovcf::RangePair> result;
+    size_t start = fileBPRange.first;
+    while (start <= fileBPRange.second) {
+        result.emplace_back(start, std::min(fileBPRange.second, start + perPart - 1));
+        start += perPart;
+    }
+    return std::move(result);
 }
 
 int main(int argc, char* argv[]) {
@@ -338,7 +518,7 @@ int main(int argc, char* argv[]) {
         "text file in the format that can be loaded via numpy.loadtxt(), where the first line is a comment "
         "containing information about the metadata. This option takes a list of metadata to export, which "
         "can be: all, chrom, qual, filter, info",
-        {'e', "--export-metadata"});
+        {'e', "export-metadata"});
     args::ValueFlag<size_t> forceToPloidy(parser,
                                           "forceToPloidy",
                                           "IGD files have a single ploidy, but you can use this to force all "
@@ -349,6 +529,10 @@ int main(int argc, char* argv[]) {
         "update-indiv-ids",
         "Given a text file with an individual ID per line, set the IDs in the output IGD file to match them",
         {"update-indiv-ids"});
+    args::ValueFlag<size_t> jobs(parser,
+                                 "jobs",
+                                 "How many jobs (threads) to use. Only VCF->IGD conversion supports this currently",
+                                 {'j', "jobs"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -417,6 +601,15 @@ int main(int argc, char* argv[]) {
 
         const bool isVcf = ends_with(*infile, ".vcf") || ends_with(*infile, ".vcf.gz");
         if (isVcf) {
+            constexpr size_t MAX_JOBS = 1024;
+            const size_t numJobs = jobs ? *jobs : 1;
+            if (numJobs < 1 || numJobs > MAX_JOBS) {
+                PICOVCF_THROW_ERROR(picovcf::ApiMisuse, "Invalid number of jobs specified");
+            }
+
+            // TODO: user-input range should apply to this as well...
+            std::vector<picovcf::RangePair> jobRanges = getRangesForJobs(*infile, numJobs);
+            PICOVCF_RELEASE_ASSERT(!jobRanges.empty());
 
             // FIXME: apply range to metadata export as well.
             if (!outfile) {
@@ -431,7 +624,20 @@ int main(int argc, char* argv[]) {
                     metadataOutDirectory = metadataOutDirectory + ".meta";
                     std::cout << "Exporting metadata to file(s) beginning with prefix " << metadataOutDirectory
                               << std::endl;
-                    vcfExportMetadata(*infile, metadataOutDirectory, *exportMetadata);
+                    VCFExportWorker exportWorker;
+                    if (jobRanges.size() == 1) {
+                        exportWorker.vcfExportMetadata(
+                            jobRanges.front(), *infile, metadataOutDirectory, *exportMetadata);
+                    } else {
+                        size_t jobId = 1;
+                        for (const auto& range : jobRanges) {
+                            std::stringstream metaOutJob;
+                            metaOutJob << metadataOutDirectory << jobId++;
+                            std::cerr << "ADD_WORK(" << range.first << ", " << metaOutJob.str() << ")\n";
+                            exportWorker.addWork({range, *infile, metaOutJob.str(), *exportMetadata});
+                        }
+                        exportWorker.doAllWork(numJobs);
+                    }
                     return 0;
                 }
                 std::cerr << "VCF input is only supported for conversion to IGD, and/or to export meta-data. "
@@ -454,38 +660,49 @@ int main(int argc, char* argv[]) {
 
             const bool emitVariantIds = !noVariantIds;
 
-            void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr;
-            void* callbackContext = nullptr;
-            std::unique_ptr<MetadataWriteInfo> writeInfo;
-            if (exportMetadata) {
-                std::string metadataOutDirectory = *outfile;
-                if (ends_with(metadataOutDirectory, ".igd")) {
-                    metadataOutDirectory = removeExt(metadataOutDirectory);
+            VCFConvertWorker convertWorker;
+            if (jobRanges.size() == 1) {
+                convertWorker.vcfConvert({
+                    /*jobId=*/0,
+                    /*vcfFilename=*/*infile,
+                    /*igdFilename=*/*outfile,
+                    /*description=*/description,
+                    /*exportList=*/exportMetadata ? *exportMetadata : "",
+                    /*emitVariantIds=*/emitVariantIds,
+                    /*forceUnphased=*/forceUnphasedArg,
+                    /*forceToPloidy=*/forceToPloidy ? *forceToPloidy : 0,
+                    /*dropUnphased=*/dropUnphased,
+                    /*range=*/jobRanges.front(),
+                });
+            } else {
+                size_t jobId = 1;
+                for (const auto& range : jobRanges) {
+                    VCFConvertJob job = {/*jobId=*/jobId++,
+                                         /*vcfFilename=*/*infile,
+                                         /*igdFilename=*/*outfile,
+                                         /*description=*/description,
+                                         /*exportList=*/exportMetadata ? *exportMetadata : "",
+                                         /*emitVariantIds=*/emitVariantIds,
+                                         /*forceUnphased=*/forceUnphasedArg,
+                                         /*forceToPloidy=*/forceToPloidy ? *forceToPloidy : 0,
+                                         /*dropUnphased=*/dropUnphased,
+                                         /*range=*/range};
+                    convertWorker.addWork(job);
                 }
-                metadataOutDirectory = metadataOutDirectory + ".meta";
-                std::cout << "Exporting metadata to directory: " << metadataOutDirectory << std::endl;
-
-                writeInfo.reset(new MetadataWriteInfo(metadataOutDirectory, *exportMetadata));
-                variantCallback = writeNextVariant;
-                callbackContext = writeInfo.get();
+                convertWorker.doAllWork(numJobs);
+                std::vector<std::string> mergeInputs;
+                for (const auto& igdName : convertWorker.getResults()) {
+                    mergeInputs.emplace_back(igdName);
+                }
+                std::ofstream outStream(*outfile, std::ios::binary);
+                mergeIGDs(outStream, mergeInputs);
             }
-            vcfToIGD(*infile,
-                     *outfile,
-                     description,
-                     true,
-                     /*emitIndividualIds=*/true,
-                     emitVariantIds,
-                     forceUnphasedArg,
-                     forceToPloidy ? *forceToPloidy : 0,
-                     dropUnphased,
-                     variantCallback,
-                     callbackContext,
-                     {bpStart, bpEnd});
             return 0;
         } else {
             ONLY_SUPPORTED_FOR_VCF(forceToPloidy, "--force-ploidy");
             ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
             ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
+            ONLY_SUPPORTED_FOR_VCF(jobs, "--jobs");
         }
 
         if (mergeWith) {
