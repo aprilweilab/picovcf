@@ -1314,7 +1314,7 @@ public:
     static constexpr const char* const SUPPORTED_PREFIX = "VCFv4";
     static constexpr const char* const META_FILE_FORMAT = "fileformat";
 
-    // 128kb for reading compressed data from the file, note this is likely to
+    // 128KB for reading compressed data from the file, note this is likely to
     // result in an uncompressed buffer of a few megabytes.
     static constexpr size_t COMPRESSED_BUFFER_SIZE = 128 * 1024;
     // 1MB buffer for reading uncompressed data. Larger is faster, to a point.

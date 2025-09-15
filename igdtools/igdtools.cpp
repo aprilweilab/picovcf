@@ -814,9 +814,10 @@ int main(int argc, char* argv[]) {
         }
 
         // Drop any individuals that are not kept, and map them to the order in the filter list.
-        std::vector<size_t> mapIndividual(igd.numIndividuals());
-        std::iota(mapIndividual.begin(), mapIndividual.end(), 0);
+        std::vector<size_t> mapIndividual;
         if (keepSamples) {
+            mapIndividual.resize(igd.numIndividuals());
+            std::iota(mapIndividual.begin(), mapIndividual.end(), 0);
             if (trimSamples) {
                 throw std::runtime_error("Cannot specify both --samples and --trim");
             }
@@ -850,6 +851,8 @@ int main(int argc, char* argv[]) {
             }
             effectiveSampleCt = igd.isPhased() ? (ploidy * (keptIndivs)) : keptIndivs;
         } else if (trimSamples) {
+            mapIndividual.resize(igd.numIndividuals());
+            std::iota(mapIndividual.begin(), mapIndividual.end(), 0);
             if (*trimSamples >= igd.numIndividuals()) {
                 std::cerr << "--trim value is larger than or equal to the number of individuals" << std::endl;
                 return 2;
@@ -932,20 +935,22 @@ int main(int argc, char* argv[]) {
 
             const size_t iDivisor = igd.isPhased() ? ploidy : 1;
             auto filterSamples = [&](IGDSampleList& samples) {
-                size_t k = 0;
-                for (size_t j = 0; j < samples.size(); j++) {
-                    const size_t indiv = samples[j] / iDivisor;
-                    size_t hap = 0;
-                    if (igd.isPhased()) {
-                        hap = samples[j] % iDivisor;
+                if (!mapIndividual.empty()) {
+                    size_t k = 0;
+                    for (size_t j = 0; j < samples.size(); j++) {
+                        const size_t indiv = samples[j] / iDivisor;
+                        size_t hap = 0;
+                        if (igd.isPhased()) {
+                            hap = samples[j] % iDivisor;
+                        }
+                        const size_t mappedIndex = mapIndividual.at(indiv);
+                        if (mappedIndex != std::numeric_limits<size_t>::max()) {
+                            samples[k++] = (mappedIndex * iDivisor) + hap;
+                        }
                     }
-                    const size_t mappedIndex = mapIndividual.at(indiv);
-                    if (mappedIndex != std::numeric_limits<size_t>::max()) {
-                        samples[k++] = (mappedIndex * iDivisor) + hap;
+                    if (k != samples.size()) {
+                        samples.resize(k);
                     }
-                }
-                if (k != samples.size()) {
-                    samples.resize(k);
                 }
             };
 
@@ -1098,7 +1103,7 @@ int main(int argc, char* argv[]) {
                     if (!indivIds.empty()) {
                         idsToUse.resize(numIndividuals);
                         for (size_t i = 0; i < indivIds.size(); i++) {
-                            const size_t mappedIndex = mapIndividual.at(i);
+                            const size_t mappedIndex = mapIndividual.empty() ? i : mapIndividual.at(i);
                             if (mappedIndex != std::numeric_limits<size_t>::max()) {
                                 idsToUse.at(mappedIndex) = indivIds[i];
                             }
