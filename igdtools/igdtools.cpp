@@ -297,6 +297,8 @@ int main(int argc, char* argv[]) {
     args::ValueFlag<std::string> outfile(parser, "output", "The output file to produce.", {'o', "out"});
     args::ValueFlag<std::string> outputDescription(
         parser, "outputDescription", "The description string to include in the IGD output.", {"description"});
+    args::ValueFlagList<std::string> mergeWith(
+        parser, "mergeWith", "Merge the input IGD file with all of these specified IGD files.", {"merge"});
     args::ValueFlag<std::string> range(
         parser, "range", "Restrict to the given base-pair range (inclusive).", {'r', "range"});
     args::ValueFlag<std::string> frange(parser,
@@ -336,7 +338,7 @@ int main(int argc, char* argv[]) {
         "text file in the format that can be loaded via numpy.loadtxt(), where the first line is a comment "
         "containing information about the metadata. This option takes a list of metadata to export, which "
         "can be: all, chrom, qual, filter, info",
-        {'e', "--export-metadata"});
+        {'e', "export-metadata"});
     args::ValueFlag<size_t> forceToPloidy(parser,
                                           "forceToPloidy",
                                           "IGD files have a single ploidy, but you can use this to force all "
@@ -392,6 +394,14 @@ int main(int argc, char* argv[]) {
         }                                                                                                              \
     } while (0)
 
+#define UNSUPPORTED_FOR_MERGE(parameter, parameterName)                                                                \
+    do {                                                                                                               \
+        if ((bool)(parameter)) {                                                                                       \
+            std::cerr << "Parameter " << (parameterName) << " is not supported for merging" << std::endl;              \
+            return 1;                                                                                                  \
+        }                                                                                                              \
+    } while (0)
+
     std::string description = outputDescription ? *outputDescription : "";
 
     try {
@@ -423,6 +433,7 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(dropNonSNVs, "--drop-non-snvs");
             UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
             UNSUPPORTED_FOR_VCF(keepSamples, "--samples");
+            UNSUPPORTED_FOR_VCF(mergeWith, "--merge");
 
             const bool emitVariantIds = !noVariantIds;
 
@@ -478,6 +489,36 @@ int main(int argc, char* argv[]) {
             ONLY_SUPPORTED_FOR_VCF(forceToPloidy, "--force-ploidy");
             ONLY_SUPPORTED_FOR_VCF(dropUnphased, "--drop-unphased");
             ONLY_SUPPORTED_FOR_VCF(exportMetadata, "--export-metadata");
+        }
+
+        if (mergeWith) {
+            if (!outfile) {
+                std::cerr << "ERROR: --out (-o) required for --merge" << std::endl;
+                return 2;
+            }
+            UNSUPPORTED_FOR_MERGE(range, "--range");
+            UNSUPPORTED_FOR_MERGE(frange, "--frange");
+            UNSUPPORTED_FOR_MERGE(info, "--info");
+            UNSUPPORTED_FOR_MERGE(individuals, "--individuals");
+            UNSUPPORTED_FOR_MERGE(variants, "--variants");
+            UNSUPPORTED_FOR_MERGE(stats, "--stats");
+            UNSUPPORTED_FOR_MERGE(alleles, "--alleles");
+            UNSUPPORTED_FOR_MERGE(trimSamples, "--trim");
+            UNSUPPORTED_FOR_MERGE(keepSamples, "--samples");
+            UNSUPPORTED_FOR_MERGE(forceUnphasedArg, "--force-unphased");
+            UNSUPPORTED_FOR_MERGE(dropMultiSites, "--drop-multi-sites");
+            UNSUPPORTED_FOR_MERGE(dropNonSNVs, "--drop-non-snvs");
+            UNSUPPORTED_FOR_MERGE(dropNonSNVSites, "--drop-non-snv-sites");
+            UNSUPPORTED_FOR_MERGE(updateIndividualIds, "--update-individuals");
+            UNSUPPORTED_FOR_MERGE(noVariantIds, "--no-var-ids");
+
+            std::vector<std::string> inputFilenames = {*infile};
+            for (const auto& fn : *mergeWith) {
+                inputFilenames.emplace_back(fn);
+            }
+            std::ofstream outStream(*outfile, std::ios::binary);
+            mergeIGDs(outStream, inputFilenames, outputDescription ? *outputDescription : "");
+            return 0;
         }
 
         // Not a VCF, then assume it is IGD and load the header.

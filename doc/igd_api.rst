@@ -17,3 +17,8 @@ VCF to IGD conversion
 
 .. doxygenfunction:: picovcf::vcfToIGD
 
+IGD merging
+~~~~~~~~~~~
+
+.. doxygenfunction:: picovcf::mergeIGDs
+
