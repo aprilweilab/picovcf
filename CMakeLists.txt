@@ -29,6 +29,7 @@ set(PICOVCF_TEST_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/test/test_igd.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_main.cpp
     ${CMAKE_CURRENT_LIST_DIR}/test/test_valid_vcf.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/test/test_variant_view.cpp
   )
 
 if (${ENABLE_VCF_GZ})
