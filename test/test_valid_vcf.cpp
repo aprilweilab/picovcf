@@ -10,6 +10,7 @@ extern const std::string getVCF42_EXAMPLE_FILE();
 extern const std::string getMSPRIME_EXAMPLE_FILE();
 extern const std::string getHAPLOID_DATA_EXAMPLE_FILE();
 extern const std::string getMIXED_DATA_EXAMPLE_FILE();
+extern const std::string getCONTIG_EXAMPLE_FILE();
 
 TEST(ValidVCF, SpecExample) {
     const size_t EXPECT_VARIANTS = 6;
@@ -180,4 +181,71 @@ TEST(ValidVCF, MixedPloidy) {
         }
     }
     ASSERT_FALSE(vcf.nextVariant());
+}
+
+std::vector<size_t> getAllPositions(VCFFile& vcf) {
+    std::vector<size_t> result;
+    vcf.seekBeforeVariants();
+    while (vcf.nextVariant()) {
+        VCFVariantView& variant = vcf.currentVariant();
+        result.push_back(variant.getPosition());
+    }
+    return std::move(result);
+}
+
+TEST(ValidVCF, Contigs) {
+    const std::string inputFile = getCONTIG_EXAMPLE_FILE();
+    // All contigs (default)
+    {
+        const size_t EXPECT_VARIANTS = 6;
+        VCFFile vcf(inputFile);
+
+        ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcf.numIndividuals(), 3);
+        auto positions = getAllPositions(vcf);
+        const std::vector<size_t> expected = {4000, 4500, 7777, 14000, 14500, 17777};
+        ASSERT_EQ(positions, expected);
+    }
+
+    // Only one contig -- should fail
+    {
+        VCFFile vcf(inputFile, PVCF_VCFFILE_CONTIG_REQUIRE_ONE);
+        ASSERT_THROW(vcf.numVariants(), ApiMisuse);
+    }
+
+    // Non-existent contig -- should fail
+    {
+        ASSERT_THROW(
+            VCFFile vcf(inputFile, "random_string"),
+            ApiMisuse);
+    }
+
+    // contig "20" by name and by being the first
+    {
+        const size_t EXPECT_VARIANTS = 3;
+        VCFFile vcf(inputFile, "20");
+        VCFFile vcfFirst(inputFile, PVCF_VCFFILE_CONTIG_FIRST);
+
+        ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcfFirst.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcf.numIndividuals(), 3);
+        ASSERT_EQ(vcfFirst.numIndividuals(), 3);
+        const auto positions = getAllPositions(vcf);
+        const auto firstPos = getAllPositions(vcfFirst);
+        const std::vector<size_t> expected = {4000, 4500, 7777};
+        ASSERT_EQ(positions, expected);
+        ASSERT_EQ(firstPos, expected);
+    }
+
+    // contig "blargh" by name
+    {
+        const size_t EXPECT_VARIANTS = 3;
+        VCFFile vcf(inputFile, "blargh");
+
+        ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcf.numIndividuals(), 3);
+        const auto positions = getAllPositions(vcf);
+        const std::vector<size_t> expected = {14000, 14500, 17777};
+        ASSERT_EQ(positions, expected);
+    }
 }

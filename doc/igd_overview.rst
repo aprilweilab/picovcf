@@ -58,6 +58,16 @@ individuals are returned when ``numCopies=2`` and the heterozygous individuals a
 individual is homozygous in the reference allele, they will not be in any sample list (homozygous for reference is the implicit
 case).  The :cpp:func:`picovcf::IGDData::getSamplesWithAlt` function is still used to retrieve the corresponding sample lists.
 
+Contigs/Sequences
+-----------------
+
+IGD does not support contigs or sequences. The general usage is to create a single IGD file per sequence
+(e.g., chromosome) rather than having many sequences in a single file. For ``igdtools``, the default is
+to convert all VCF contigs into the IGD file (thus losing the "contig" information, unless you export
+it as metadata - see below). A more robust approach is to either only convert VCF files with a single
+contig (``igdtools --contig-require-one``) or to pick the specific sequence name you want to convert
+(``igdtools --contig <contig name>``).
+
 Metadata
 --------
 
