@@ -8,6 +8,15 @@ THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 INPUT_DIR = os.path.join(THIS_DIR, "..", "example_vcfs")
 EXPECT_DIR = os.path.join(THIS_DIR, "expected")
 
+# These tests assume you built igdtools in a build/ directory, or if that fails
+# then you can specify `USE_IGDTOOLS_PATH=1` in the environment to force it to use
+# the one on the path
+IGDTOOLS = (
+    "igdtools"
+    if (int(os.environ.get("USE_IGDTOOLS_PATH", 0)) == 1)
+    else os.path.join(THIS_DIR, "..", "..", "build", "igdtools")
+)
+
 
 def run(cmd):
     print(f"Running: {cmd}")
@@ -28,29 +37,81 @@ def quiet_del(filepath):
 
 
 class TestIgdTools(unittest.TestCase):
+    def test_merge_igd(self):
+        run([IGDTOOLS, input("msprime.example.vcf"), "--out", "msprime.example.igd"])
+        run(
+            [
+                IGDTOOLS,
+                "msprime.example.igd",
+                "-r",
+                "55829-56531",
+                "-o",
+                "test.merge.pt1.igd",
+            ]
+        )
+        run(
+            [
+                IGDTOOLS,
+                "msprime.example.igd",
+                "-r",
+                "56554-56812",
+                "-o",
+                "test.merge.pt2.igd",
+            ]
+        )
+        run(
+            [
+                IGDTOOLS,
+                "test.merge.pt2.igd",
+                "--merge",
+                "test.merge.pt1.igd",
+                "-o",
+                "test.merged.igd",
+            ]
+        )
+        result = run([IGDTOOLS, "--alleles", "test.merged.igd"])
+        self.assertEqual(
+            result.decode("utf-8").split("\n"),
+            [
+                "POSITION\tREF\tALT\tALT COUNT\tTOTAL",
+                "55829\tA\tG\t90\t20000",
+                "56531\tA\tG\t329\t20000",
+                "56554\tA\tT\t150\t20000",
+                "56812\tG\tT\t131\t20000",
+                "",
+            ],
+        )
+
     def test_subsample_igd(self):
-        run(["igdtools", input("msprime.example.vcf"), "--out", "msprime.example.igd"])
+        run([IGDTOOLS, input("msprime.example.vcf"), "--out", "msprime.example.igd"])
         with open("test.subsample.txt", "w") as f:
             f.write("\n".join(["tsk_100", "tsk_6", "tsk_63", "tsk_222"]))
-        run(["igdtools", "-S", "test.subsample.txt", "msprime.example.igd", "-o", "test.subsample.igd"])
-        result = run(["igdtools", "--individuals", "test.subsample.igd"])
-        self.assertEqual(
-            result.decode("utf-8").split("\n"),
-            ["0: tsk_100",
-             "1: tsk_6",
-             "2: tsk_63",
-             "3: tsk_222",
-             ""]
+        run(
+            [
+                IGDTOOLS,
+                "-S",
+                "test.subsample.txt",
+                "msprime.example.igd",
+                "-o",
+                "test.subsample.igd",
+            ]
         )
-        result = run(["igdtools", "--alleles", "test.subsample.igd"])
+        result = run([IGDTOOLS, "--individuals", "test.subsample.igd"])
         self.assertEqual(
             result.decode("utf-8").split("\n"),
-            ["POSITION\tREF\tALT\tALT COUNT\tTOTAL",
-             "55829\tA\tG\t0\t8",
-             "56531\tA\tG\t1\t8",
-             "56554\tA\tT\t1\t8",
-             "56812\tG\tT\t0\t8",
-             ""]
+            ["0: tsk_100", "1: tsk_6", "2: tsk_63", "3: tsk_222", ""],
+        )
+        result = run([IGDTOOLS, "--alleles", "test.subsample.igd"])
+        self.assertEqual(
+            result.decode("utf-8").split("\n"),
+            [
+                "POSITION\tREF\tALT\tALT COUNT\tTOTAL",
+                "55829\tA\tG\t0\t8",
+                "56531\tA\tG\t1\t8",
+                "56554\tA\tT\t1\t8",
+                "56812\tG\tT\t0\t8",
+                "",
+            ],
         )
 
     def test_unphased_from_igd(self):
@@ -59,15 +120,13 @@ class TestIgdTools(unittest.TestCase):
         # So if we convert them both in the correct way, the IGDs should be identical.
 
         # Convert unphased VCF to IGD
-        run(
-            ["igdtools", input("unphased.example.vcf"), "--out", "unphased.example.igd"]
-        )
+        run([IGDTOOLS, input("unphased.example.vcf"), "--out", "unphased.example.igd"])
 
         # Convert phased VCF to IGD, then convert phased IGD to unphased IGD
-        run(["igdtools", input("msprime.example.vcf"), "--out", "msprime.example.igd"])
+        run([IGDTOOLS, input("msprime.example.vcf"), "--out", "msprime.example.igd"])
         run(
             [
-                "igdtools",
+                IGDTOOLS,
                 "msprime.example.igd",
                 "--out",
                 "msprime.example.dephased.igd",
@@ -75,11 +134,11 @@ class TestIgdTools(unittest.TestCase):
             ]
         )
 
-        unphased_result = run(["igdtools", "unphased.example.igd", "--alleles"]).decode(
+        unphased_result = run([IGDTOOLS, "unphased.example.igd", "--alleles"]).decode(
             "utf-8"
         )
         dephased_result = run(
-            ["igdtools", "msprime.example.dephased.igd", "--alleles"]
+            [IGDTOOLS, "msprime.example.dephased.igd", "--alleles"]
         ).decode("utf-8")
 
         self.assertEqual(unphased_result, dephased_result)
@@ -99,7 +158,7 @@ class TestIgdTools(unittest.TestCase):
         # Convert unphased VCF to IGD
         run(
             [
-                "igdtools",
+                IGDTOOLS,
                 input("unphased.example.vcf"),
                 "--out",
                 "unphased2.example.igd",
@@ -109,7 +168,7 @@ class TestIgdTools(unittest.TestCase):
         # Convert phased VCF to IGD, then convert phased IGD to unphased IGD
         run(
             [
-                "igdtools",
+                IGDTOOLS,
                 input("msprime.example.vcf"),
                 "--force-unphased",
                 "--out",
@@ -117,11 +176,11 @@ class TestIgdTools(unittest.TestCase):
             ]
         )
 
-        unphased_result = run(
-            ["igdtools", "unphased2.example.igd", "--alleles"]
-        ).decode("utf-8")
+        unphased_result = run([IGDTOOLS, "unphased2.example.igd", "--alleles"]).decode(
+            "utf-8"
+        )
         dephased_result = run(
-            ["igdtools", "msprime.example.dephased2.igd", "--alleles"]
+            [IGDTOOLS, "msprime.example.dephased2.igd", "--alleles"]
         ).decode("utf-8")
 
         self.assertEqual(unphased_result, dephased_result)
@@ -136,10 +195,10 @@ class TestIgdTools(unittest.TestCase):
 
     def test_multi_allelic(self):
         # Verify that removing multi-allelic sites works
-        run(["igdtools", input("multi.vcf"), "-o", "multi.igd"])
+        run([IGDTOOLS, input("multi.vcf"), "-o", "multi.igd"])
         run(
             [
-                "igdtools",
+                IGDTOOLS,
                 "multi.igd",
                 "--drop-multi-sites",
                 "-o",
@@ -148,7 +207,7 @@ class TestIgdTools(unittest.TestCase):
         )
 
         igd_tools_result = run(
-            ["igdtools", "multi.dropped_sites.igd", "--alleles"]
+            [IGDTOOLS, "multi.dropped_sites.igd", "--alleles"]
         ).decode("utf-8")
         with open(expect("multi.dropped_sites.af.txt"), "rb") as fexpect:
             expected_result = fexpect.read().decode("utf-8")
@@ -163,10 +222,10 @@ class TestIgdTools(unittest.TestCase):
         # Verify that removing non-snvs works for both sites and variants.
 
         # SITES
-        run(["igdtools", input("multi.vcf"), "-o", "multi.igd"])
+        run([IGDTOOLS, input("multi.vcf"), "-o", "multi.igd"])
         run(
             [
-                "igdtools",
+                IGDTOOLS,
                 "multi.igd",
                 "--drop-non-snv-sites",
                 "-o",
@@ -175,16 +234,16 @@ class TestIgdTools(unittest.TestCase):
         )
 
         igd_tools_result = run(
-            ["igdtools", "multi.only_snv_sites.igd", "--alleles"]
+            [IGDTOOLS, "multi.only_snv_sites.igd", "--alleles"]
         ).decode("utf-8")
         with open(expect("multi.only_snv_sites.af.txt"), "rb") as fexpect:
             expected_result = fexpect.read().decode("utf-8")
         self.assertEqual(igd_tools_result, expected_result)
 
         # VARIANTS
-        run(["igdtools", "multi.igd", "--drop-non-snvs", "-o", "multi.only_snvs.igd"])
+        run([IGDTOOLS, "multi.igd", "--drop-non-snvs", "-o", "multi.only_snvs.igd"])
 
-        igd_tools_result = run(["igdtools", "multi.only_snvs.igd", "--alleles"]).decode(
+        igd_tools_result = run([IGDTOOLS, "multi.only_snvs.igd", "--alleles"]).decode(
             "utf-8"
         )
         with open(expect("multi.only_snvs.af.txt"), "rb") as fexpect:

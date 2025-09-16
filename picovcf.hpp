@@ -1,6 +1,7 @@
 #ifndef PICOVCF_HPP
 #define PICOVCF_HPP
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cctype>
@@ -1954,6 +1955,9 @@ private:
     std::vector<IGDAllele> m_alternateAlleles;
     // Separate vector for storing the "long" alleles (larger than 4 nucleotides)
     std::vector<std::string> m_longAlleles;
+
+    friend void
+    mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description);
 };
 
 template <typename T> static inline void writeScalar(T intValue, std::ostream& outStream) {
@@ -2189,7 +2193,212 @@ private:
     std::vector<std::string> m_referenceAlleles;
     std::vector<std::string> m_alternateAlleles;
     std::vector<IGDData::IndexEntry> m_index;
+
+    friend void
+    mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description);
 };
+
+// Copy byteSize bytes from inStream to outStream, using the provided buffer. The buffer size
+// will dictate the maximum amount copied at one time.
+static inline void
+copyBytes(std::istream& inStream, std::ostream& outStream, std::vector<uint8_t>& buffer, size_t byteSize) {
+    size_t written = 0;
+    while (written < byteSize) {
+        const size_t toRead = std::min(byteSize - written, buffer.size());
+        inStream.read(reinterpret_cast<char*>(buffer.data()), toRead);
+        const size_t amountRead = inStream.gcount();
+        outStream.write(reinterpret_cast<char*>(buffer.data()), amountRead);
+        written += amountRead;
+        PICOVCF_RELEASE_ASSERT(outStream.good());
+        if (!inStream.good()) {
+            break;
+        }
+    }
+    PICOVCF_RELEASE_ASSERT(written == byteSize);
+}
+
+/**
+ * Merge the IGD files given by a list of IGDReader into a single output stream. The
+ * input files must be _mutually exclusive_ by genome range, such that if one
+ * input covers variants over the range (R1, R2) and another covers (R3, R4) then either
+ * R1 >= R4 or R3 >= R2. The samples described by the inputs must also be identical.
+ *
+ * If only some input IGDs have variant IDs, the remaining variants will get the empty string
+ * for their identifiers.
+ * The individual IDs will be used from the first (ascending order genetic position) input IGD
+ * and will not be checked against other IGD files individual IDs.
+
+ * @param out_file: The filename to write the output IGD to.
+ * @param in_readers: List of IGDReader objects for the input IGDs to be merged.
+ * @param force_overwrite: Optional. Set to True to always write the output file, even if it
+ *      already exists.
+ * @param description: Optional. Description to write to the IGD header. If not specified (None)
+ *      then the description of the first input IGD will be used.
+ */
+inline void
+mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilenames, std::string description = {}) {
+    if (inputFilenames.size() < 2) {
+        PICOVCF_THROW_ERROR(ApiMisuse, "No point in merging fewer than 2 IGD files");
+    }
+
+    std::vector<IGDData> readers;
+    for (const auto& filename : inputFilenames) {
+        readers.emplace_back(filename);
+    }
+
+    // Sanity check that properties of inputs are consistent.
+    const size_t ploidy = readers.front().getPloidy();
+    const size_t numIndiv = readers.front().numIndividuals();
+    const bool phased = readers.front().isPhased();
+    std::string source = readers.front().getSource();
+    const std::string& useDesc = description.empty() ? readers.front().getDescription() : description;
+    bool writeVarIds = false;
+    {
+        std::vector<IGDData> useReaders;
+        for (auto& reader : readers) {
+            if (reader.getPloidy() != ploidy) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Multiple ploidy values in input IGDs");
+            }
+            if (reader.numIndividuals() != numIndiv) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Different sample set sizes in input IGDs");
+            }
+            if (reader.isPhased() != phased) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Different phasedness in input IGDs");
+            }
+            if (reader.hasVariantIds()) {
+                writeVarIds = true;
+            }
+            if (reader.numVariants() > 0) {
+                useReaders.push_back(std::move(reader));
+            }
+        }
+        readers = std::move(useReaders);
+    }
+    if (readers.empty()) {
+        PICOVCF_THROW_ERROR(ApiMisuse, "No IGD files had variants, cannot merge");
+    }
+
+    // Now sort the input readers according to their first variant, and then ensure no overlap.
+    auto positionOrder = [&](IGDData& first, IGDData& second) { return first.getPosition(0) < second.getPosition(0); };
+    std::sort(readers.begin(), readers.end(), positionOrder);
+    for (size_t i = 1; i < readers.size(); i++) {
+        auto& prev = readers[i - 1];
+        auto& curr = readers[i];
+        if (prev.getPosition(prev.numVariants() - 1) > curr.getPosition(curr.numVariants() - 1)) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "Overlapping input IGDs");
+        }
+    }
+
+    // Given an IGD input and a variant index, get the associated file offset and encoded genomic position
+    auto getOffsetForVariant = [&](IGDData& reader, size_t index) {
+        bool endOffset = false;
+        if (index == reader.numVariants()) {
+            index = reader.numVariants() - 1;
+            endOffset = true;
+        }
+        reader.m_infile.seekg(reader.getVariantIndexOffset(index));
+        PICOVCF_GOOD_OR_API_MISUSE(reader.m_infile);
+        IGDData::IndexEntry indexDatum;
+        reader.m_infile.read(reinterpret_cast<char*>(&indexDatum), sizeof(indexDatum));
+        if (endOffset) {
+            const bool isSparse = (bool)(indexDatum.bpPosition & IGDData::BP_POS_FLAGS_SPARSE);
+            size_t byteCount = 0;
+            if (isSparse) {
+                reader.m_infile.seekg(indexDatum.filePosDataRow);
+                byteCount = (readScalar<SampleT>(reader.m_infile) * sizeof(SampleT)) + sizeof(SampleT);
+            } else {
+                byteCount = picovcf_div_ceiling<SampleT, 8>(reader.numSamples());
+            }
+            return std::pair<uint64_t, uint64_t>{indexDatum.filePosDataRow + byteCount, indexDatum.bpPosition};
+        }
+        return std::pair<uint64_t, uint64_t>{indexDatum.filePosDataRow, indexDatum.bpPosition};
+    };
+
+    auto writer = IGDWriter(ploidy, numIndiv, phased);
+    // We interpret as little as possible from the input IGDs, to speed up the merging.
+    // The order of the resulting file looks like this:
+    //   HEADER
+    writer.writeHeader(outputStream, source, useDesc);
+
+    //   SAMPLE LISTS (input 1)   <-- offset1
+    //   ...
+    //   SAMPLE LISTS (input N)   <-- offsetN
+    std::vector<size_t> oldOffsets;
+    std::vector<size_t> newOffsets;
+    {
+        // Copy up to 64MB at a time.
+        std::vector<uint8_t> copyBuffer(1024 * 1024 * 64);
+        for (auto& reader : readers) {
+            const auto startPair = getOffsetForVariant(reader, 0);
+            const auto endPair = getOffsetForVariant(reader, reader.numVariants());
+            PICOVCF_RELEASE_ASSERT(endPair.first > startPair.first);
+            const size_t byteSize = endPair.first - startPair.first;
+            reader.m_infile.seekg(startPair.first);
+            oldOffsets.emplace_back(startPair.first);
+            newOffsets.emplace_back(outputStream.tellp());
+            copyBytes(reader.m_infile, outputStream, copyBuffer, byteSize);
+            writer.m_header.numVariants += reader.numVariants();
+        }
+    }
+
+    //   INDEX + offset1 (input1)
+    //   ...
+    //   INDEX + offsetN (inputN)
+    writer.m_header.filePosIndex = outputStream.tellp();
+    PICOVCF_RELEASE_ASSERT(readers.size() == oldOffsets.size());
+    PICOVCF_RELEASE_ASSERT(readers.size() == newOffsets.size());
+    for (size_t i = 0; i < readers.size(); i++) {
+        auto& reader = readers[i];
+        const size_t oldOffset = oldOffsets[i];
+        const size_t newOffset = newOffsets[i];
+        for (size_t j = 0; j < reader.numVariants(); j++) {
+            const auto inputPair = getOffsetForVariant(reader, j);
+            writeScalar<uint64_t>(inputPair.second, outputStream);
+            writeScalar<uint64_t>((inputPair.first - oldOffset) + newOffset, outputStream);
+        }
+    }
+
+    //   VARIANT INFO (input1)
+    //   ...
+    //   VARIANT INFO (inputN)
+    writer.m_header.filePosVariants = outputStream.tellp();
+    for (auto& reader : readers) {
+        reader.m_infile.seekg(reader.m_header.filePosVariants);
+        for (size_t i = 0; i < reader.numVariants(); i++) {
+            const auto ref = readString(reader.m_header.version, reader.m_infile);
+            const auto alt = readString(reader.m_header.version, reader.m_infile);
+            writeString(ref, outputStream);
+            writeString(alt, outputStream);
+        }
+    }
+
+    //   INDIVIDUAL IDS (input1) -- optional
+    {
+        const auto& indivIds = readers.front().getIndividualIds();
+        writer.writeIndividualIds(outputStream, indivIds);
+    }
+
+    //   VARIANT IDS (input1)
+    //   ...
+    //   VARIANT IDS (inputN)
+    if (writeVarIds) {
+        writer.m_header.filePosVariantIds = outputStream.tellp();
+        writeScalar<uint64_t>(writer.m_header.numVariants, outputStream);
+        for (auto& reader : readers) {
+            auto vids = reader.getVariantIds();
+            if (vids.size() < reader.numVariants()) {
+                PICOVCF_ASSERT_OR_MALFORMED(vids.empty(), "IGD input file has unexpected number of variant IDs");
+                vids.resize(reader.numVariants(), "");
+            }
+            for (const auto& identifier : vids) {
+                writeString(identifier, outputStream);
+            }
+        }
+    }
+
+    outputStream.seekp(0);
+    writer.writeHeader(outputStream, source, useDesc);
+}
 
 /**
  * Using minimal memory, convert the given VCF file (can be gzipped) to an IGD
