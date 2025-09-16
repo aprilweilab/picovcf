@@ -24,9 +24,6 @@ Classes and Methods for VCF Parsing
 .. doxygenclass:: picovcf::VCFVariantView
     :members:
 
-.. doxygenclass:: picovcf::IndividualIteratorGT
-    :members:
-
 .. doxygenfunction:: picovcf::picovcf_parse_structured_meta
 
 Structs
