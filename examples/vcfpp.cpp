@@ -31,12 +31,7 @@ int main(int argc, char* argv[]) {
 
     VCFFile vcf(filename);
 
-    if (command == "test") {
-        if (vcf.lowerBoundPosition(10000000000)) {
-            const VCFVariantView& variant = vcf.currentVariant();
-            std::cout << "Found variant: " << variant.getPosition() << "\n";
-        }
-    } else if (command == "fast_stats") {
+    if (command == "fast_stats") {
         // Count numVariants() is the slow part, so we leave that off!
         std::cout << "Stats for " << filename << std::endl;
         std::cout << "  Has index? " << (vcf.isUsingIndex() ? "yes" : "no") << std::endl;

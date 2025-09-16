@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <zconf.h>
 
 #if VCF_GZ_SUPPORT
 #include <zlib.h>
@@ -1002,10 +1001,11 @@ public:
         assert(posSize > 0);
         std::string posStr = m_currentLine.substr(m_nonGTPositions[POS_CHROM_END] + 1, posSize - 1);
         char* endPtr = nullptr;
-        const auto result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
+        const size_t result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
         if (endPtr != (posStr.c_str() + posStr.size())) {
             PICOVCF_THROW_ERROR(MalformedFile, "Invalid position (cannot parse): " << posStr);
         }
+        PICOVCF_ASSERT_OR_MALFORMED(result <= MAX_SUPPORTED_POSITION, "Variant position too large");
         return result;
     }
 
@@ -1114,7 +1114,7 @@ public:
 
     /**
      * Get an array (std::vector) of allele values per haploid, where the alleles for an individual
-     * are gruoped together (consecutive) based on maxPloidy. The maxPloidy can be retrieved via
+     * are grouped together (consecutive) based on maxPloidy. The maxPloidy can be retrieved via
      * getMaxPloidy(), and can differ for each Variant, but is the same within a variant. When an
      * individual has missing data for an allele, the value is picovcf::MISSING_DATA, and when their
      * ploidy is less than maxPloidy, the remaining alleles are filled in with picovcf::MIXED_PLOIDY.
@@ -1349,7 +1349,6 @@ public:
             indexFilename << filename << ".tbi";
             m_index = std::unique_ptr<TabixIndex>(new TabixIndex(indexFilename.str()));
         } catch (FileReadError& error) {
-            ; // TODO: optional warning if verbose
         }
 #endif
 
@@ -1490,7 +1489,7 @@ public:
      */
     size_t numVariants() {
         if (m_variants == INTERNAL_VALUE_NOT_SET) {
-            scanVariants(/*coundVariants=*/true);
+            scanVariants(/*countVariants=*/true);
         }
         return m_variants;
     }
@@ -1765,16 +1764,16 @@ static inline std::string readString(const uint64_t version, std::istream& inStr
     return std::move(strValue);
 }
 
-static inline void copyBytes(std::istream& inStream, std::ostream& outStream, size_t byteSize) {
-    constexpr size_t bufferSize = 32 * 1024 * 1024;
-    // XXX should probably heap allocate this directly.
-    static uint8_t buffer[bufferSize];
+// Copy byteSize bytes from inStream to outStream, using the provided buffer. The buffer size
+// will dictate the maximum amount copied at one time.
+static inline void
+copyBytes(std::istream& inStream, std::ostream& outStream, std::vector<uint8_t>& buffer, size_t byteSize) {
     size_t written = 0;
     while (written < byteSize) {
-        const size_t toRead = std::min(byteSize - written, bufferSize);
-        inStream.read(reinterpret_cast<char*>(&buffer[0]), toRead);
+        const size_t toRead = std::min(byteSize - written, buffer.size());
+        inStream.read(reinterpret_cast<char*>(buffer.data()), toRead);
         const size_t amountRead = inStream.gcount();
-        outStream.write(reinterpret_cast<char*>(&buffer[0]), amountRead);
+        outStream.write(reinterpret_cast<char*>(buffer.data()), amountRead);
         written += amountRead;
         PICOVCF_RELEASE_ASSERT(outStream.good());
         if (!inStream.good()) {
@@ -2656,16 +2655,20 @@ mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilen
     //   SAMPLE LISTS (input N)   <-- offsetN
     std::vector<size_t> oldOffsets;
     std::vector<size_t> newOffsets;
-    for (auto& reader : readers) {
-        const auto startPair = getOffsetForVariant(reader, 0);
-        const auto endPair = getOffsetForVariant(reader, reader.numVariants());
-        PICOVCF_RELEASE_ASSERT(endPair.first > startPair.first);
-        const size_t byteSize = endPair.first - startPair.first;
-        reader.m_infile.seekg(startPair.first);
-        oldOffsets.emplace_back(startPair.first);
-        newOffsets.emplace_back(outputStream.tellp());
-        copyBytes(reader.m_infile, outputStream, byteSize);
-        writer.m_header.numVariants += reader.numVariants();
+    {
+        // Copy up to 64MB at a time.
+        std::vector<uint8_t> copyBuffer(1024 * 1024 * 64);
+        for (auto& reader : readers) {
+            const auto startPair = getOffsetForVariant(reader, 0);
+            const auto endPair = getOffsetForVariant(reader, reader.numVariants());
+            PICOVCF_RELEASE_ASSERT(endPair.first > startPair.first);
+            const size_t byteSize = endPair.first - startPair.first;
+            reader.m_infile.seekg(startPair.first);
+            oldOffsets.emplace_back(startPair.first);
+            newOffsets.emplace_back(outputStream.tellp());
+            copyBytes(reader.m_infile, outputStream, copyBuffer, byteSize);
+            writer.m_header.numVariants += reader.numVariants();
+        }
     }
 
     //   INDEX + offset1 (input1)

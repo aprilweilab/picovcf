@@ -170,7 +170,15 @@ inline std::string removeExt(const std::string& pathname) {
     return pathname;
 }
 
-void make_dir_or_throw(const std::string& directory) {
+void removeFileOrThrow(const std::string& filename) {
+    if (0 != remove(filename.c_str())) {
+        std::stringstream ssErr;
+        ssErr << "Failed to remove file " << filename << ": " << strerror(errno);
+        throw std::runtime_error(ssErr.str());
+    }
+}
+
+void makeDirOrThrow(const std::string& directory) {
     std::stringstream ssErr;
     int rv = mkdir(directory.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
     if (rv == 0) {
@@ -218,7 +226,7 @@ struct MetadataWriteInfo {
     MetadataWriteInfo(const std::string& prefix, const std::string& metadataFieldList)
         : metadataOutDirectory(prefix) {
 
-        make_dir_or_throw(metadataOutDirectory);
+        makeDirOrThrow(metadataOutDirectory);
 
         for (size_t i = 0; i < outputField.size(); i++) {
             outputField[i] = false;
@@ -450,21 +458,26 @@ protected:
     std::string processItem(VCFConvertJob job) override { return vcfConvert(job); }
 };
 
-std::vector<picovcf::RangePair> getRangesForJobs(const std::string& vcfFilename, size_t numJobs) {
+std::vector<picovcf::RangePair>
+getRangesForJobs(const std::string& vcfFilename, size_t numJobs, picovcf::RangePair range) {
     picovcf::VCFFile vcf(vcfFilename);
-    picovcf::RangePair fileBPRange = vcf.getGenomeRange();
-    const size_t span = fileBPRange.second - fileBPRange.first;
+    const picovcf::RangePair fileBPRange = vcf.getGenomeRange();
+    picovcf::RangePair useRange = fileBPRange;
+    if (range.first > useRange.first || range.second < useRange.second) {
+        useRange = range;
+    }
+    const size_t span = useRange.second - useRange.first;
     const size_t perPart = (span + (numJobs - 1)) / numJobs;
     if (perPart < 100 || numJobs == 1) {
-        return {fileBPRange};
+        return {useRange};
     }
     if (!vcf.isUsingIndex()) {
         std::cerr << "WARNING: Parallel processing a VCF file without a tabix index is NOT recommended" << std::endl;
     }
     std::vector<picovcf::RangePair> result;
-    size_t start = fileBPRange.first;
-    while (start <= fileBPRange.second) {
-        result.emplace_back(start, std::min(fileBPRange.second, start + perPart - 1));
+    size_t start = useRange.first;
+    while (start <= useRange.second) {
+        result.emplace_back(start, std::min(useRange.second, start + perPart - 1));
         start += perPart;
     }
     return std::move(result);
@@ -607,11 +620,9 @@ int main(int argc, char* argv[]) {
                 PICOVCF_THROW_ERROR(picovcf::ApiMisuse, "Invalid number of jobs specified");
             }
 
-            // TODO: user-input range should apply to this as well...
-            std::vector<picovcf::RangePair> jobRanges = getRangesForJobs(*infile, numJobs);
+            std::vector<picovcf::RangePair> jobRanges = getRangesForJobs(*infile, numJobs, {bpStart, bpEnd});
             PICOVCF_RELEASE_ASSERT(!jobRanges.empty());
 
-            // FIXME: apply range to metadata export as well.
             if (!outfile) {
                 if (exportMetadata) {
                     std::string metadataOutDirectory = *infile;
@@ -625,19 +636,17 @@ int main(int argc, char* argv[]) {
                     std::cout << "Exporting metadata to file(s) beginning with prefix " << metadataOutDirectory
                               << std::endl;
                     VCFExportWorker exportWorker;
-                    if (jobRanges.size() == 1) {
-                        exportWorker.vcfExportMetadata(
-                            jobRanges.front(), *infile, metadataOutDirectory, *exportMetadata);
-                    } else {
-                        size_t jobId = 1;
-                        for (const auto& range : jobRanges) {
-                            std::stringstream metaOutJob;
-                            metaOutJob << metadataOutDirectory << jobId++;
-                            std::cerr << "ADD_WORK(" << range.first << ", " << metaOutJob.str() << ")\n";
-                            exportWorker.addWork({range, *infile, metaOutJob.str(), *exportMetadata});
+                    const bool isParallel = (jobRanges.size() > 1);
+                    size_t jobId = isParallel ? 1 : 0;
+                    for (const auto& range : jobRanges) {
+                        std::stringstream metaOutJob;
+                        metaOutJob << metadataOutDirectory;
+                        if (jobId > 0) {
+                            metaOutJob << jobId++;
                         }
-                        exportWorker.doAllWork(numJobs);
+                        exportWorker.addWork({range, *infile, metaOutJob.str(), *exportMetadata});
                     }
+                    exportWorker.doAllWork(numJobs);
                     return 0;
                 }
                 std::cerr << "VCF input is only supported for conversion to IGD, and/or to export meta-data. "
@@ -650,52 +659,35 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(keepSamples, "--samples");
             UNSUPPORTED_FOR_VCF(mergeWith, "--merge");
 
-            // TODO: move all of this into a function, and then:
-            // 1. Check if VCF is indexed/indexable -- vcf.gz and have HTS support
-            //      --> if not, reject the -j parameter
-            // 2. Come up with list of ranges [lower, upper) -- is this fast with an indexed VCF?
-            // 3. Create a tmp directory for each part
-            // 4. Convert that part to IGD (threaded)
-            // 5. Call IGD merge (C++ impl needed)
-
             const bool emitVariantIds = !noVariantIds;
 
             VCFConvertWorker convertWorker;
-            if (jobRanges.size() == 1) {
-                convertWorker.vcfConvert({
-                    /*jobId=*/0,
-                    /*vcfFilename=*/*infile,
-                    /*igdFilename=*/*outfile,
-                    /*description=*/description,
-                    /*exportList=*/exportMetadata ? *exportMetadata : "",
-                    /*emitVariantIds=*/emitVariantIds,
-                    /*forceUnphased=*/forceUnphasedArg,
-                    /*forceToPloidy=*/forceToPloidy ? *forceToPloidy : 0,
-                    /*dropUnphased=*/dropUnphased,
-                    /*range=*/jobRanges.front(),
-                });
-            } else {
-                size_t jobId = 1;
-                for (const auto& range : jobRanges) {
-                    VCFConvertJob job = {/*jobId=*/jobId++,
-                                         /*vcfFilename=*/*infile,
-                                         /*igdFilename=*/*outfile,
-                                         /*description=*/description,
-                                         /*exportList=*/exportMetadata ? *exportMetadata : "",
-                                         /*emitVariantIds=*/emitVariantIds,
-                                         /*forceUnphased=*/forceUnphasedArg,
-                                         /*forceToPloidy=*/forceToPloidy ? *forceToPloidy : 0,
-                                         /*dropUnphased=*/dropUnphased,
-                                         /*range=*/range};
-                    convertWorker.addWork(job);
-                }
-                convertWorker.doAllWork(numJobs);
+            const bool isParallel = (jobRanges.size() > 1);
+            size_t jobId = isParallel ? 1 : 0;
+            for (const auto& range : jobRanges) {
+                VCFConvertJob job = {/*jobId=*/jobId++,
+                                     /*vcfFilename=*/*infile,
+                                     /*igdFilename=*/*outfile,
+                                     /*description=*/description,
+                                     /*exportList=*/exportMetadata ? *exportMetadata : "",
+                                     /*emitVariantIds=*/emitVariantIds,
+                                     /*forceUnphased=*/forceUnphasedArg,
+                                     /*forceToPloidy=*/forceToPloidy ? *forceToPloidy : 0,
+                                     /*dropUnphased=*/dropUnphased,
+                                     /*range=*/range};
+                convertWorker.addWork(job);
+            }
+            convertWorker.doAllWork(numJobs);
+            if (isParallel) {
                 std::vector<std::string> mergeInputs;
                 for (const auto& igdName : convertWorker.getResults()) {
                     mergeInputs.emplace_back(igdName);
                 }
                 std::ofstream outStream(*outfile, std::ios::binary);
                 mergeIGDs(outStream, mergeInputs);
+                for (const auto& fn : mergeInputs) {
+                    removeFileOrThrow(fn);
+                }
             }
             return 0;
         } else {
