@@ -1032,6 +1032,15 @@ private:
     friend class VCFFile;
 };
 
+// String constants in a header-only library are tricky with C++11, so use preprocessor.
+
+/** Traverse all contigs */
+#define PVCF_VCFFILE_CONTIG_ALL "picovcf_all_contigs"
+/** Traverse only the first contig that contains at least one variant */
+#define PVCF_VCFFILE_CONTIG_FIRST "picovcf_first_nonempty"
+/** Throw an error if the file contains more than one contig with at least one variant */
+#define PVCF_VCFFILE_CONTIG_REQUIRE_ONE "picovcf_require_one"
+
 /**
  * A lazy parser for VCF files.
  *
@@ -1049,7 +1058,7 @@ public:
     // 1MB buffer for reading uncompressed data. Larger is faster, to a point.
     static constexpr size_t UNCOMPRESSED_BUFFER_SIZE = 1024 * 1024;
 
-    explicit VCFFile(const std::string& filename)
+    explicit VCFFile(const std::string& filename, std::string contig = PVCF_VCFFILE_CONTIG_ALL)
         : m_variants(INTERNAL_VALUE_NOT_SET),
           m_genomeRange({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
           m_posVariants({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
@@ -1066,6 +1075,7 @@ public:
         parseHeader();
 
         m_currentVariant.initialize(numIndividuals());
+        initContigs(contig);
 
         std::string version = getMetaInfo(VCFFile::META_FILE_FORMAT);
         if (version.substr(0, 5) == SUPPORTED_PREFIX) {
@@ -1075,6 +1085,77 @@ public:
         } else {
             PICOVCF_THROW_ERROR(MalformedFile, "Unsupported VCF version: " << version);
         }
+    }
+
+    void initContigs(std::string contig) {
+        std::string ignore;
+        size_t length = 0;
+        if (contig == PVCF_VCFFILE_CONTIG_ALL) {
+            m_contigHandling = PVCH_ALL;
+            PICOVCF_RELEASE_ASSERT(m_contig.empty());
+        } else if (contig == PVCF_VCFFILE_CONTIG_FIRST || contig == PVCF_VCFFILE_CONTIG_REQUIRE_ONE) {
+            PICOVCF_RELEASE_ASSERT(m_contig.empty());
+            VCFVariantView& first = getFirstVariantUnfiltered();
+            m_contig = first.getChrom();
+            if (contig == PVCF_VCFFILE_CONTIG_REQUIRE_ONE) {
+                m_contigHandling = PVCH_ONE;
+            } else {
+                m_contigHandling = PVCH_SPECIFIC;
+            }
+        } else {
+            if (!getContig(contig, length, ignore)) {
+                PICOVCF_THROW_ERROR(ApiMisuse, "Could not find contig with ID " << contig);
+            }
+            PICOVCF_ASSERT_OR_MALFORMED(length > 0, "0-length contig in header");
+            m_contigHandling = PVCH_SPECIFIC;
+            m_contig = contig;
+        }
+        if (!m_contig.empty() && getContig(m_contig, length, ignore)) {
+            m_genomeRange.first = 0;
+            m_genomeRange.second = length;
+        }
+    }
+
+    /**
+     * Get information for the contig with the given name.
+     *
+     * @param[in] contig The contig name, as found in the VCF header.
+     * @param[out] length Returns the length found in the VCF header, if the function return value
+     *      was true.
+     * @param[out] assembly Returns the assembly name found in the VCF header, if the function return
+     *      value was true.
+     * @return true if the contig was found, false otherwise.
+     */
+    bool getContig(const std::string& contig, size_t& length, std::string& assembly) {
+        bool found = false;
+        for (const auto& metaString : getAllMetaInfo("contig")) {
+            std::map<std::string, std::string> kv = picovcf::picovcf_parse_structured_meta(metaString);
+            auto findIt = kv.find("ID");
+            PICOVCF_ASSERT_OR_MALFORMED(findIt != kv.end(), "contig metadata is missing ID field");
+            const std::string& ident = findIt->second;
+            if (ident == contig) {
+                findIt = kv.find("assembly");
+                if (findIt != kv.end()) {
+                    assembly = findIt->second;
+                } else {
+                    assembly = "";
+                }
+                findIt = kv.find("length");
+                if (findIt != kv.end()) {
+                    const std::string& lenStr = findIt->second;
+                    char* endPtr = nullptr;
+                    length = static_cast<size_t>(std::strtoull(lenStr.c_str(), &endPtr, 10));
+                    if (endPtr != (lenStr.c_str() + lenStr.size())) {
+                        PICOVCF_THROW_ERROR(MalformedFile, "Invalid contig length: " << lenStr);
+                    }
+                } else {
+                    length = 0;
+                }
+                found = true;
+                break;
+            }
+        }
+        return found;
     }
 
     /**
@@ -1189,8 +1270,10 @@ public:
         bool more = false;
         while (m_infile->readline(m_currentLine) > 0) {
             m_currentVariant.reset();
-            more = true;
-            break;
+            if (useVariant(m_currentVariant)) {
+                more = true;
+                break;
+            }
         }
         return more;
     }
@@ -1203,6 +1286,35 @@ public:
     VCFVariantView& currentVariant() { return m_currentVariant; }
 
 private:
+    // Predicate that filters variants based on the contig and our current contig settings.
+    inline bool useVariant(const VCFVariantView& variant) const {
+        switch (m_contigHandling) {
+        case PVCH_ONE:
+            if (m_contig != variant.getChrom()) {
+                PICOVCF_THROW_ERROR(ApiMisuse,
+                                    "User specified file should contain a single contig, but it contained at least 2");
+            }
+            return true;
+        case PVCH_SPECIFIC: return (m_contig == variant.getChrom());
+        case PVCH_ALL:
+        default: return true;
+        }
+    }
+
+    // Get the first variant, ignoring any contig-related filters.
+    VCFVariantView& getFirstVariantUnfiltered() {
+        const FileOffset saved = getFilePosition();
+        seekBeforeVariants();
+        const size_t amountRead = m_infile->readline(m_currentLine);
+        if (amountRead == 0) {
+            PICOVCF_THROW_ERROR(ApiMisuse, "VCF file has no variants");
+        }
+        m_currentVariant.reset();
+        auto& result = currentVariant();
+        setFilePosition(saved);
+        return result;
+    }
+
     void parseHeader() {
         FileOffset prevPosition = {0, 0};
         std::string lineBuffer;
@@ -1257,6 +1369,9 @@ private:
         m_genomeRange.second = 0;
         while (this->nextVariant()) {
             VCFVariantView variant = this->currentVariant();
+            if (!useVariant(variant)) {
+                continue;
+            }
             const double position = variant.getPosition();
             if (m_genomeRange.first == INTERNAL_VALUE_NOT_SET) {
                 m_genomeRange.first = position;
@@ -1268,6 +1383,12 @@ private:
         }
         setFilePosition(originalPosition);
     }
+
+    enum ContigHandling {
+        PVCH_ALL = 0,
+        PVCH_ONE = 1,
+        PVCH_SPECIFIC = 2,
+    };
 
     std::unique_ptr<BufferedReader> m_infile;
     // The number of variants represented
@@ -1284,6 +1405,10 @@ private:
     // These three members represent the current variant we're looking at.
     VCFVariantView m_currentVariant;
     std::string m_currentLine;
+
+    // Describe what contig(s) the VCFFile will traverse.
+    ContigHandling m_contigHandling;
+    std::string m_contig;
 };
 
 template <typename T> static inline T readScalar(std::istream& inStream) {
@@ -2087,6 +2212,12 @@ private:
  * (see callbackContext).
  * @param[in] callbackContext [Optional] Pointer to an object that will be passed to
  * variantCallback.
+ * @param[in] contig [Optional] Select which contig(s) to use when converting from VCF
+ * to IGD. IGD does not support contigs, so everything will be "merged" into a single
+ * contig in the IGD file. Use PVCF_VCFFILE_CONTIG_REQUIRE_ONE if you only want to convert
+ * VCF files that have a single CONTIG. See also PVCF_VCFFILE_CONTIG_ALL (default) and
+ * PVCF_VCFFILE_CONTIG_FIRST. Otherwise, takes a free-form string value that should match
+ * the contig to be converted.
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
@@ -2098,8 +2229,9 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      const size_t forceToPloidy = 0,
                      bool dropUnphased = false,
                      void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr,
-                     void* callbackContext = nullptr) {
-    VCFFile vcf(vcfFilename);
+                     void* callbackContext = nullptr,
+                     std::string contig = PVCF_VCFFILE_CONTIG_ALL) {
+    VCFFile vcf(vcfFilename, contig);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.nextVariant(), "VCF file has no variants");
     VCFVariantView& variant1 = vcf.currentVariant();

@@ -27,6 +27,22 @@ picovcf, or you can also install them via ``pip install igdtools``.
   vcf_api
   igd_api
 
+VCF Features
+------------
+
+Not all VCF parsing features are supported. The primary focus is supporting reference-aligned
+VCF data. VCF is extremely flexible, and that flexibility can make it more complex to use for
+simple use cases, so ``picovcf`` tries to focus on the simpler use cases.
+
+Features:
+
+* Mixed ploidy and mixed phasedness are supported. See :doxygenfunction:`picovcf::VCFVariantView::getPhasedness` for a helper that simplifies detecting mixed phasedness.
+* Variant-based metadata is supported. The main ``VCFVariantView`` accessor provides strings for the metadata (via :doxygenfunction:`picovcf::VCFVariantView::getMetaInfo`), and then :doxygenfunction:`picovcf_parse_structured_meta` is used to convert those strings into dictionaries of keys and values. See ``igdtools.cpp`` for example code.
+* Non-GT per-variant, per-individual values are not supported.
+* Contigs are supported. When you open a :doxygenclass:`VCFFile` you choose whether you want to traverse all contigs in the file (:doxygendefine:`PVCF_VCFFILE_CONTIG_ALL`), the first occurring contig (:doxygendefine:`PVCF_VCFFILE_CONTIG_FIRST`), you can require the VCF to only contain a single contig (:doxygendefine:`PVCF_VCFFILE_CONTIG_REQUIRE_ONE`), or you can just specify the contig name as a string and all other contigs will be ignored during traversal.
+
+  * Note: IGD files do not support contigs. When converting from VCF to IGD you will have to decide on the same contig options above, where "traverse" becomes "convert to a single contig".
+
 Simple Usage Examples
 ---------------------
 
@@ -42,8 +58,7 @@ VCF Example: Iterate variants
     if (argc >= 2) {
       picovcf::VCFFile vcf(argv[1]);
       vcf.seekBeforeVariants();
-      while (vcf.hasNextVariant()) {
-        vcf.nextVariant();
+      while (vcf.nextVariant()) {
         picovcf::VCFVariantView variant = vcf.currentVariant();
         std::cout << "Variant at position: " << variant.getPosition() << std::endl;
       }
@@ -65,18 +80,27 @@ VCF Example: Iterate genotypes
     if (argc >= 2) {
       picovcf::VCFFile vcf(argv[1]);
       vcf.seekBeforeVariants();
-      while (vcf.hasNextVariant()) {
-        vcf.nextVariant();
+      while (vcf.nextVariant()) {
         picovcf::VCFVariantView variant = vcf.currentVariant();
         assert(vcf.currentVariant().hasGenotypeData());
-        picovcf::IndividualIteratorGT iterator = variant.getIndividualIterator();
-        while (iterator.hasNext()) {
-          picovcf::IndexT allele1 = 0;
-          picovcf::IndexT allele2 = 0;
-          bool isPhased = iterator.getAlleles(allele1, allele2);
-          std::cout << (isPhased ? "phased" : "unphased") << " alleles: " << allele1;
-          if (allele2 != picovcf::NOT_DIPLOID) {
-            std::cout << ", " << allele2;
+        const std::vector<AlleleT> gt = variant.getGenotypeArray();
+        const size_t ploidy = variant.getMaxPloidy();
+        for (size_t indiv = 0; indiv < vcf.numIndividuals(); indiv++) {
+          const bool isPhased = variant.getIsPhased()[indiv];
+          std::cout << (isPhased ? "phased" : "unphased") << " alleles: ";
+          const size_t indivStart = indiv * ploidy;
+          for (size_t j = 0; j < ploidy; j++) {
+            const auto allele = gt.at(indivStart + j);
+            // MIXED_PLOIDY means the current individual has a ploidy less than j
+            if (allele == picovcf::MIXED_PLOIDY) {
+              std::cout << "N/A, ";
+            // Missing data - i.e., "." in the VCF file
+            } else if (allele == picovcf::MISSING_VALUE) {
+              std::cout << "?, ";
+            // A regular REF/ALT value 0,1,...
+            } else {
+              std::cout << allele << ", ";
+            }
           }
           std::cout << std::endl;
         }

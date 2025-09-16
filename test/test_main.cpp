@@ -36,6 +36,10 @@ const std::string getMIXED_DATA_EXAMPLE_FILE() {
     return getExampleDir() + "/mixploidy.example.vcf";
 }
 
+const std::string getCONTIG_EXAMPLE_FILE() {
+    return getExampleDir() + "/contigs.vcf";
+}
+
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

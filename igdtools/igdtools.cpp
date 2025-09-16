@@ -347,6 +347,16 @@ int main(int argc, char* argv[]) {
         "update-indiv-ids",
         "Given a text file with an individual ID per line, set the IDs in the output IGD file to match them",
         {"update-indiv-ids"});
+    args::Flag contigRequireOne(parser,
+                                "contig-require-one",
+                                "Require the input VCF to contain a single contig, or fail the conversion.",
+                                {"contig-require-one"});
+    args::Flag contigUseFirst(parser,
+                              "contig-use-first",
+                              "Only convert the first contig encountered in the input VCF.",
+                              {"contig-use-first"});
+    args::ValueFlag<std::string> specificContig(
+        parser, "contig", "Only convert the contig with the given name from the input VCF.", {"contig"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -431,6 +441,26 @@ int main(int argc, char* argv[]) {
                 variantCallback = writeNextVariant;
                 callbackContext = writeInfo.get();
             }
+            std::string contig = PVCF_VCFFILE_CONTIG_ALL;
+            if (contigRequireOne) {
+                contig = PVCF_VCFFILE_CONTIG_REQUIRE_ONE;
+                if (contigUseFirst || specificContig) {
+                    PICOVCF_THROW_ERROR(ApiMisuse,
+                                        "Only one of --contig-require-one, --contig-use-first, --contig are allowed.");
+                }
+            } else if (contigUseFirst) {
+                contig = PVCF_VCFFILE_CONTIG_FIRST;
+                if (contigRequireOne || specificContig) {
+                    PICOVCF_THROW_ERROR(ApiMisuse,
+                                        "Only one of --contig-require-one, --contig-use-first, --contig are allowed.");
+                }
+            } else if (specificContig) {
+                contig = *specificContig;
+                if (contigRequireOne || contigUseFirst) {
+                    PICOVCF_THROW_ERROR(ApiMisuse,
+                                        "Only one of --contig-require-one, --contig-use-first, --contig are allowed.");
+                }
+            }
             vcfToIGD(*infile,
                      *outfile,
                      description,
@@ -441,7 +471,8 @@ int main(int argc, char* argv[]) {
                      forceToPloidy ? *forceToPloidy : 0,
                      dropUnphased,
                      variantCallback,
-                     callbackContext);
+                     callbackContext,
+                     contig);
             return 0;
         } else {
             ONLY_SUPPORTED_FOR_VCF(forceToPloidy, "--force-ploidy");
