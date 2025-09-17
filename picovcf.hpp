@@ -5,6 +5,7 @@
 #include <array>
 #include <cassert>
 #include <cctype>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -277,6 +278,16 @@ public:
 
     virtual ~BufferedReader() { fclose(m_file); }
 
+    virtual void seek_block(const FileOffset& offset) {
+        std::fseek(m_file, offset.first, SEEK_SET);
+        readBuffered();
+        m_position = offset.second;
+        while (m_position >= m_buffer.size()) {
+            m_position -= m_buffer.size();
+            readBuffered();
+        }
+    }
+
     virtual void seek(const FileOffset& offset) {
         std::fseek(m_file, offset.first, SEEK_SET);
         readBuffered();
@@ -331,6 +342,41 @@ public:
         }
         buffer.resize(lineBytes);
         return lineBytes;
+    }
+
+    size_t read(char* buffer, size_t numBytes) {
+        if (m_buffer.empty()) {
+            readBuffered();
+        }
+        if (m_buffer.empty()) {
+            return 0;
+        }
+        PICOVCF_RELEASE_ASSERT(m_position < m_buffer.size());
+        size_t bytesRemaining = numBytes;
+        size_t bytesCopied = 0;
+        while (bytesRemaining > 0) {
+            const uint8_t* bufPtr = &m_buffer.data()[m_position];
+            const size_t bufAvail = m_buffer.size() - m_position;
+            if (bytesRemaining <= bufAvail) {
+                std::memcpy(&buffer[bytesCopied], bufPtr, bytesRemaining);
+                m_position += bytesRemaining;
+                bytesCopied += bytesRemaining;
+                bytesRemaining = 0;
+            } else {
+                std::memcpy(&buffer[bytesCopied], bufPtr, bufAvail);
+                m_position += bufAvail;
+                bytesCopied += bufAvail;
+                bytesRemaining -= bufAvail;
+            }
+            if (m_position == m_buffer.size()) {
+                if (!readBuffered()) {
+                    break; // EOF / read failure
+                }
+            } else {
+                PICOVCF_RELEASE_ASSERT(m_position < m_buffer.size());
+            }
+        }
+        return bytesCopied;
     }
 
     virtual bool eof() {
@@ -402,10 +448,21 @@ public:
 
     void resetStream() { PICOVCF_RELEASE_ASSERT(Z_OK == inflateReset(&m_zlibStream)); }
 
+    void seek_block(const FileOffset& offset) override {
+        std::fseek(m_file, offset.first, SEEK_SET);
+        resetStream();
+        readBuffered();
+        m_position = offset.second;
+        while (m_position >= m_buffer.size()) {
+            m_position -= m_buffer.size();
+            readBuffered();
+        }
+    }
+
     // Seek is not a constant operation in .gz files. We could do something like
     // the zran.c example from zlib, but I'd like to avoid that complexity unless
     // we really need it. Generally, seeking around a VCF file is going to be
-    // slow, so avoid it!
+    // slow, so avoid it, unless you have a Tabix index!
     void seek(const FileOffset& offset) override {
         PICOVCF_RELEASE_ASSERT(offset.first % m_compressed.size() == 0);
         std::fseek(m_file, 0, SEEK_SET);
@@ -509,6 +566,225 @@ private:
     std::vector<uint8_t> m_compressed;
     size_t m_lastFileRead;
     z_stream m_zlibStream;
+};
+#endif
+
+// The paper, format PDF, etc., are all very vague about this. They say "16kb" per index, which is
+// related to base-pairs, but in reality it is 2^14, which is 16384. Props to the authors of libStatGen
+// where I finally found some very clear code showing the linear index divisor.
+static constexpr size_t TABIX_LINDEX_SHIFT = 14;
+
+#if VCF_GZ_SUPPORT
+struct TabixHeader {
+    char magic[4];
+    int32_t numSequences;
+    int32_t format;
+    int32_t colSeq;
+    int32_t colBeg;
+    int32_t colEnd;
+    int32_t meta; // Leading character for comment lines (always #)
+    int32_t skip; // Number of lines to skip at the beginning
+    int32_t nameLengths;
+};
+
+/**
+ * Tabix organizes the index by "sequence" (contig in the VCF file). This represents a single
+ * contig and all relate indices.
+ */
+class TabixIndexSequence {
+public:
+    using VirtualRange = std::pair<uint64_t, uint64_t>;
+    using Chunks = std::vector<VirtualRange>;
+
+    TabixIndexSequence(std::string name)
+        : m_name(name) {}
+
+    /**
+     * Split a virtual offset into it's two parts: the offset of the compressed block within the file,
+     * and the offset of the data within that block (after decompression).
+     *
+     * @param[in] virtualOffset The 64-bit tabix virtual offset.
+     * @return A pair of integers, where .first is the offset to the block, and .second is the offset
+     *      within the block.
+     */
+    static FileOffset splitVirt(uint64_t virtualOffset) { return {virtualOffset >> 16, virtualOffset & 0xFFFFU}; }
+
+    /**
+     * Initialize the sequence contents by parsing the bin information from the Tabix file, as
+     * represented by the ZBufferedReader.
+     *
+     * @param[in] reader The ZBufferedReader that is reading the tabix file.
+     */
+    void parseBins(ZBufferedReader& reader) {
+        int32_t numBins = readOrDie<int32_t>(reader);
+        for (size_t j = 0; j < numBins; j++) {
+            const uint32_t binNum = readOrDie<uint32_t>(reader);
+            const int32_t chunks = readOrDie<int32_t>(reader);
+            // The chunks are contiguous regions of the vcf.gz file that are assigned to this bin.
+            Chunks chunkList;
+            for (size_t k = 0; k < chunks; k++) {
+                chunkList.emplace_back(readOrDie<uint64_t>(reader), readOrDie<uint64_t>(reader));
+            }
+            m_bins.emplace(binNum, std::move(chunkList));
+        }
+        // The linear index
+        const int32_t numIntervals = readOrDie<int32_t>(reader);
+        for (size_t j = 0; j < numIntervals; j++) {
+            m_linear.emplace_back(readOrDie<uint64_t>(reader));
+        }
+    }
+
+    /**
+     * Get the list of potential Chunks that overlap the given range.
+     *
+     * @param[in] rangeBegin Inclusive range start (base-pair position).
+     * @param[in] rangeEnd Exclusive range end (base-pair position).
+     * @return A std::vector of Chunks, each of which is a std::vector of VirtualRange
+     *      objects (std::pair) where .first is the beginning of the range and .end is the
+     *      end of the range (virtual offsets).
+     */
+    std::vector<Chunks> lookupByBin(int32_t rangeBegin, int32_t rangeEnd) const {
+        std::vector<Chunks> result;
+        auto addBin = [&](int32_t bin) {
+            const auto findIt = m_bins.find(bin);
+            if (m_bins.end() != findIt) {
+                result.emplace_back(findIt->second);
+            }
+        };
+
+        addBin(0);
+        int32_t k;
+        --rangeEnd;
+        for (k = 1 + (rangeBegin >> 26); k <= 1 + (rangeEnd >> 26); ++k) {
+            addBin(k);
+        }
+        for (k = 9 + (rangeBegin >> 23); k <= 9 + (rangeEnd >> 23); ++k) {
+            addBin(k);
+        }
+        for (k = 73 + (rangeBegin >> 20); k <= 73 + (rangeEnd >> 20); ++k) {
+            addBin(k);
+        }
+        for (k = 585 + (rangeBegin >> 17); k <= 585 + (rangeEnd >> 17); ++k) {
+            addBin(k);
+        }
+        for (k = 4681 + (rangeBegin >> 14); k <= 4681 + (rangeEnd >> 14); ++k) {
+            addBin(k);
+        }
+        return std::move(result);
+    }
+
+    /**
+     * Get a reference to the linear index, which is just an ordered list of virtual offsets
+     * to every block in the BGZF file.
+     *
+     * @return A std::vector of offsets.
+     */
+    const std::vector<uint64_t>& linear() const { return m_linear; }
+
+    /**
+     * Get the virtual offset for the last block in the linear index.
+     *
+     * @return The last virtual offset.
+     */
+    uint64_t getLastVOffset() const { return m_linear.back(); }
+
+    /**
+     * Get the number of bins present in the index.
+     *
+     * @return Number of bins.
+     */
+    size_t numBins() const { return m_bins.size(); }
+
+    /**
+     * Get the sequence (contig) name.
+     */
+    const std::string& name() const { return m_name; }
+
+private:
+    template <typename T> T readOrDie(ZBufferedReader& reader) {
+        T value = 0;
+        size_t readAmt = reader.read(reinterpret_cast<char*>(&value), sizeof(value));
+        PICOVCF_ASSERT_OR_MALFORMED(sizeof(value) == readAmt, "Failed to read value of size " << sizeof(value));
+        return value;
+    }
+
+    std::unordered_map<size_t, Chunks> m_bins;
+    std::vector<uint64_t> m_linear;
+    std::string m_name;
+};
+
+/**
+ * A tabix index file for a BGZF-based VCF file.
+ */
+class TabixIndex {
+public:
+    static constexpr size_t COMPRESSED_BUFFER_SIZE = 1024;
+
+    /**
+     * Read the tabix index from disk.
+     *
+     * @param[in] filename The tabix file path.
+     */
+    TabixIndex(const std::string& filename)
+        : m_reader(filename, COMPRESSED_BUFFER_SIZE) {
+        TabixHeader header;
+        size_t readAmt = m_reader.read(reinterpret_cast<char*>(&header), sizeof(header));
+        PICOVCF_ASSERT_OR_MALFORMED(readAmt == sizeof(header), "Could not read tabix header");
+        header.magic[3] = 0;
+        PICOVCF_ASSERT_OR_MALFORMED(std::string(header.magic) == "TBI", "Bad magic in tabix file");
+        const bool isBEDIndexing = (header.format & 0x10000);
+        PICOVCF_ASSERT_OR_MALFORMED(!isBEDIndexing, "Unsupported BED-style indexing");
+        PICOVCF_ASSERT_OR_MALFORMED((header.format & 0xFFFF) == 2, "Tabix index is not for a VCF file");
+        PICOVCF_ASSERT_OR_MALFORMED(header.meta == '#', "Tabix index is not for a VCF file (meta character is not #)");
+
+        // Read sequence names.
+        std::vector<char> namesv(header.nameLengths, 0);
+        readAmt = m_reader.read(const_cast<char*>(namesv.data()), namesv.size());
+        PICOVCF_ASSERT_OR_MALFORMED(readAmt == namesv.size(), "Could not read tabix sequence names");
+        std::stringstream ss;
+        for (size_t i = 0; i < namesv.size(); i++) {
+            if (namesv[i] == 0) {
+                m_sequences.push_back(ss.str());
+                ss.str("");
+            } else {
+                ss << namesv[i];
+            }
+        }
+        PICOVCF_ASSERT_OR_MALFORMED(
+            m_sequences.size() == header.numSequences,
+            "Tabix file: number of sequence names does not match number of sequences in header");
+
+        // Parse all the sequences.
+        for (size_t i = 0; i < m_sequences.size(); i++) {
+            m_sequences[i].parseBins(m_reader);
+        }
+    }
+
+    /**
+     * Return the number of sequences (contigs) that are indexed in this tabix index.
+     */
+    size_t numSequences() const { return m_sequences.size(); }
+
+    /**
+     * Get a reference to the list of sequences.
+     */
+    const std::vector<TabixIndexSequence>& sequences() const { return m_sequences; }
+
+    /**
+     * Retrieve a sequence (contig) by name.
+     */
+    const TabixIndexSequence& getSequence(const std::string& name) const {
+        for (const auto& seq : m_sequences) {
+            if (seq.name() == name) {
+                return seq;
+            }
+        }
+        throw ApiMisuse("Sequence with the given name not found.");
+    }
+
+private:
+    ZBufferedReader m_reader;
+    std::vector<TabixIndexSequence> m_sequences;
 };
 #endif
 
@@ -737,7 +1013,7 @@ public:
         assert(posSize > 0);
         std::string posStr = m_currentLine.substr(m_nonGTPositions[POS_CHROM_END] + 1, posSize - 1);
         char* endPtr = nullptr;
-        const auto result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
+        const size_t result = static_cast<size_t>(strtoull(posStr.c_str(), &endPtr, 10));
         if (endPtr != (posStr.c_str() + posStr.size())) {
             PICOVCF_THROW_ERROR(MalformedFile, "Invalid position (cannot parse): " << posStr);
         }
@@ -1059,9 +1335,10 @@ public:
     // 1MB buffer for reading uncompressed data. Larger is faster, to a point.
     static constexpr size_t UNCOMPRESSED_BUFFER_SIZE = 1024 * 1024;
 
-    explicit VCFFile(const std::string& filename, std::string contig = PVCF_VCFFILE_CONTIG_ALL)
+    explicit VCFFile(const std::string& filename, std::string contig = PVCF_VCFFILE_CONTIG_ALL, bool verbose = true)
         : m_variants(INTERNAL_VALUE_NOT_SET),
           m_genomeRange({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
+          m_verbose(verbose),
           m_posVariants({INTERNAL_VALUE_NOT_SET, INTERNAL_VALUE_NOT_SET}),
           m_currentVariant(m_currentLine) {
         if (filename.size() > 3 && filename.substr(filename.size() - 3) == ".gz") {
@@ -1074,6 +1351,15 @@ public:
             m_infile = std::unique_ptr<BufferedReader>(new BufferedReader(filename, UNCOMPRESSED_BUFFER_SIZE));
         }
         parseHeader();
+
+#if VCF_GZ_SUPPORT
+        try {
+            std::stringstream indexFilename;
+            indexFilename << filename << ".tbi";
+            m_index = std::unique_ptr<TabixIndex>(new TabixIndex(indexFilename.str()));
+        } catch (FileReadError& error) {
+        }
+#endif
 
         m_currentVariant.initialize(numIndividuals());
         initContigs(contig);
@@ -1115,6 +1401,50 @@ public:
             m_genomeRange.first = 0;
             m_genomeRange.second = length;
         }
+    }
+
+    /**
+     * Is this VCF file using an index for fast random access?
+     *
+     * @return true if an index is being used.
+     */
+    bool isUsingIndex() const {
+#if VCF_GZ_SUPPORT
+        return (bool)m_index;
+#else
+        return false;
+#endif
+    }
+
+    /**
+     * Seek to the first variant greater than or equal to the given position.
+     * Slow if using a non-indexed VCF(.GZ), fast if you have a tabix index.
+     *
+     * The Tabix index uses only the linear index, not the binning index. The
+     * latter is more complex, and we're not interested in ranges so much as
+     * we are interested in a single position.
+     */
+    bool lowerBoundPosition(size_t position) {
+#if VCF_GZ_SUPPORT
+        if (!isUsingIndex()) {
+#endif
+            this->seekBeforeVariants();
+#if VCF_GZ_SUPPORT
+        } else {
+            // TODO: add contig support!
+            const auto& seq = m_index->sequences().front();
+            size_t blockIndex = static_cast<size_t>(position >> TABIX_LINDEX_SHIFT);
+            blockIndex = std::min<size_t>(blockIndex, seq.linear().size() - 1);
+            seekVirt(seq.linear().at(blockIndex));
+        }
+#endif
+        bool found = false;
+        while ((found = nextVariant())) {
+            if (currentVariant().getPosition() >= position) {
+                break;
+            }
+        }
+        return found;
     }
 
     /**
@@ -1162,21 +1492,22 @@ public:
     /**
      * Compute the number of variants in the file: expensive!
      * This is not a constant time operation, it involves scanning the entire
-     * file.
+     * file. It is faster for indexed files, as only the index is scanned.
      *
      * @return The number of variants.
      */
     size_t numVariants() {
         if (m_variants == INTERNAL_VALUE_NOT_SET) {
-            scanVariants();
+            scanVariants(/*countVariants=*/true);
         }
         return m_variants;
     }
 
     /**
      * Compute the range of positions for variants in the file.
-     * This is not a constant time operation, it involves scanning the entire
-     * file.
+     * If the VCF metadata does not contain contigs then this is not a constant time operation,
+     * it involves scanning the entire file. Otherwise the sequence length in the contig header
+     * is used.
      *
      * @return A pair of the minimum and maximum variant positions present in the
      * file.
@@ -1287,6 +1618,13 @@ public:
     VCFVariantView& currentVariant() { return m_currentVariant; }
 
 private:
+#if VCF_GZ_SUPPORT
+    void seekVirt(const uint64_t virtOffset) {
+        const auto virt = TabixIndexSequence::splitVirt(virtOffset);
+        m_infile->seek_block({virt.first, virt.second});
+    }
+#endif
+
     // Predicate that filters variants based on the contig and our current contig settings.
     inline bool useVariant(const VCFVariantView& variant) const {
         switch (m_contigHandling) {
@@ -1363,13 +1701,21 @@ private:
         PICOVCF_ASSERT_OR_MALFORMED(sawHeader, "No header line (column names) found.");
     }
 
-    void scanVariants() {
-        m_variants = 0;
+    /**
+     * Scan all the variants to collect information. If countVariants is false, this can be done
+     * very quickly on an indexed VCF. Otherwise, it is pretty slow.
+     */
+    void scanVariants(bool countVariants = false) {
+        countVariants = countVariants || !isUsingIndex();
+        if (countVariants) {
+            m_variants = 0;
+        }
         const auto originalPosition = getFilePosition();
         this->seekBeforeVariants();
+        bool skipToEnd = !countVariants;
         m_genomeRange.second = 0;
         while (this->nextVariant()) {
-            VCFVariantView variant = this->currentVariant();
+            const VCFVariantView& variant = currentVariant();
             if (!useVariant(variant)) {
                 continue;
             }
@@ -1380,7 +1726,15 @@ private:
             PICOVCF_ASSERT_OR_MALFORMED(m_genomeRange.second <= position,
                                         "VCF rows must be in ascending genome position");
             m_genomeRange.second = position;
-            m_variants++;
+            if (countVariants) {
+                m_variants++;
+            }
+#if VCF_GZ_SUPPORT
+            if (skipToEnd && isUsingIndex()) {
+                seekVirt(m_index->sequences().front().getLastVOffset());
+                skipToEnd = false;
+            }
+#endif
         }
         setFilePosition(originalPosition);
     }
@@ -1392,24 +1746,30 @@ private:
     };
 
     std::unique_ptr<BufferedReader> m_infile;
-    // The number of variants represented
+    // The number of variants in the file.
     size_t m_variants;
     // The min/max genome range
     RangePair m_genomeRange;
     // Starting position (offset) in the file for the variants information
     FileOffset m_posVariants;
+#if VCF_GZ_SUPPORT
+    // The (optional) Tabix index.
+    std::unique_ptr<TabixIndex> m_index;
+#endif
+
     // Metadata dictionary
     std::multimap<std::string, std::string> m_metaInformation;
     // Labels for individuals
     std::vector<std::string> m_individualLabels;
-
-    // These three members represent the current variant we're looking at.
+    // These two members represent the current variant we're looking at.
     VCFVariantView m_currentVariant;
     std::string m_currentLine;
 
     // Describe what contig(s) the VCFFile will traverse.
     ContigHandling m_contigHandling;
     std::string m_contig;
+
+    bool m_verbose;
 };
 
 template <typename T> static inline T readScalar(std::istream& inStream) {
@@ -2204,7 +2564,7 @@ static inline void
 copyBytes(std::istream& inStream, std::ostream& outStream, std::vector<uint8_t>& buffer, size_t byteSize) {
     size_t written = 0;
     while (written < byteSize) {
-        const size_t toRead = std::min(byteSize - written, buffer.size());
+        const size_t toRead = std::min<size_t>(byteSize - written, buffer.size());
         inStream.read(reinterpret_cast<char*>(buffer.data()), toRead);
         const size_t amountRead = inStream.gcount();
         outStream.write(reinterpret_cast<char*>(buffer.data()), amountRead);
@@ -2427,6 +2787,8 @@ mergeIGDs(std::ostream& outputStream, const std::vector<std::string>& inputFilen
  * VCF files that have a single CONTIG. See also PVCF_VCFFILE_CONTIG_ALL (default) and
  * PVCF_VCFFILE_CONTIG_FIRST. Otherwise, takes a free-form string value that should match
  * the contig to be converted.
+ * @param[in] region [Optional] Only convert variants found within this range, which is
+ * a pair (start, end) where each position is inclusive.
  */
 inline void vcfToIGD(const std::string& vcfFilename,
                      const std::string& outFilename,
@@ -2439,7 +2801,8 @@ inline void vcfToIGD(const std::string& vcfFilename,
                      bool dropUnphased = false,
                      void (*variantCallback)(const VCFFile&, VCFVariantView&, void*) = nullptr,
                      void* callbackContext = nullptr,
-                     std::string contig = PVCF_VCFFILE_CONTIG_ALL) {
+                     std::string contig = PVCF_VCFFILE_CONTIG_ALL,
+                     const std::pair<size_t, size_t> region = {INVALID_POSITION, INVALID_POSITION}) {
     VCFFile vcf(vcfFilename, contig);
     vcf.seekBeforeVariants();
     PICOVCF_ASSERT_OR_MALFORMED(vcf.nextVariant(), "VCF file has no variants");
@@ -2463,10 +2826,20 @@ inline void vcfToIGD(const std::string& vcfFilename,
     std::ofstream outFile(outFilename, std::ios::binary);
     IGDWriter writer(ploidy, vcf.numIndividuals(), isPhased);
     writer.writeHeader(outFile, vcfFilename, description);
-    vcf.seekBeforeVariants();
-    while (vcf.nextVariant()) {
+
+    bool alreadyHave = false;
+    if (region.first == INVALID_POSITION) {
+        vcf.seekBeforeVariants();
+    } else {
+        alreadyHave = vcf.lowerBoundPosition(region.first);
+    }
+    while (alreadyHave || vcf.nextVariant()) {
+        alreadyHave = false;
         VCFVariantView& variant = vcf.currentVariant();
         const auto position = variant.getPosition();
+        if (position > region.second) {
+            break;
+        }
         std::vector<AlleleT> genotypes = variant.getGenotypeArray();
         auto altAlleles = variant.getAltAlleles();
         IGDSampleList missingData;
