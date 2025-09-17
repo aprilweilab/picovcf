@@ -36,12 +36,14 @@ simple use cases, so ``picovcf`` tries to focus on the simpler use cases.
 
 Features:
 
-* Mixed ploidy and mixed phasedness are supported. See :doxygenfunction:`picovcf::VCFVariantView::getPhasedness` for a helper that simplifies detecting mixed phasedness.
-* Variant-based metadata is supported. The main ``VCFVariantView`` accessor provides strings for the metadata (via :doxygenfunction:`picovcf::VCFVariantView::getMetaInfo`), and then :doxygenfunction:`picovcf_parse_structured_meta` is used to convert those strings into dictionaries of keys and values. See ``igdtools.cpp`` for example code.
+* Mixed ploidy and mixed phasedness are supported. See :cpp:func:`picovcf::VCFVariantView::getPhasedness` for a helper that simplifies detecting mixed phasedness.
+* Variant-based metadata is supported. The main ``VCFVariantView`` accessor provides strings for the metadata (via :cpp:func:`picovcf::VCFVariantView::getMetaInfo`), and then :cpp:func:`picovcf_parse_structured_meta` is used to convert those strings into dictionaries of keys and values. See ``igdtools.cpp`` for example code.
 * Non-GT per-variant, per-individual values are not supported.
-* Contigs are supported. When you open a :doxygenclass:`VCFFile` you choose whether you want to traverse all contigs in the file (:doxygendefine:`PVCF_VCFFILE_CONTIG_ALL`), the first occurring contig (:doxygendefine:`PVCF_VCFFILE_CONTIG_FIRST`), you can require the VCF to only contain a single contig (:doxygendefine:`PVCF_VCFFILE_CONTIG_REQUIRE_ONE`), or you can just specify the contig name as a string and all other contigs will be ignored during traversal.
+* Contigs are supported. When you open a :cpp:class:`VCFFile` you choose whether you want to traverse all contigs in the file (:cpp:define:`PVCF_VCFFILE_CONTIG_ALL`), the first occurring contig (:cpp:define:`PVCF_VCFFILE_CONTIG_FIRST`), you can require the VCF to only contain a single contig (:cpp:define:`PVCF_VCFFILE_CONTIG_REQUIRE_ONE`), or you can just specify the contig name as a string and all other contigs will be ignored during traversal.
 
   * Note: IGD files do not support contigs. When converting from VCF to IGD you will have to decide on the same contig options above, where "traverse" becomes "convert to a single contig".
+
+* Tabix indexes are supported on BGZF-compressed files. See :cpp:func:`picovcf::VCFFile::lowerBoundPosition` for a method that is substantially faster with indexes, and :cpp:class:`picovcf::TabixIndex` for the tabix index handling (if you want to load the index yourself).
 
 Simple Usage Examples
 ---------------------

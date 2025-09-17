@@ -73,7 +73,7 @@ class CMakeBuild(build_ext):
 
 PACKAGE_NAME = "igdtools"
 BINARY_NAME = "igdtools"
-version = "2.3"
+version = "2.4"
 with open(os.path.join(THIS_DIR, "README.md")) as f:
     long_description = f.read()
 setup(

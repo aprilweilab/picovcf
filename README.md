@@ -5,6 +5,8 @@
 
 Single-header C++ library for fast/low-memory VCF (Variant Call Format) parsing. Gzipped VCF (.vcf.gz) is optionally supported.
 
+**NEW!** Tabix indexes are now supported. See the `lowerBoundPosition()` method in the [documentation](https://picovcf.readthedocs.io/) for an example of how Tabix indexes are used by `picovcf`.
+
 There are a lot of great tools for processing VCF files out there, but not many C++ libraries that are small (only parsing, no extra functionality) and easy to use. `picovcf` attempts to fill this niche by providing a header-only library using modern C++ (C++11) that allows clients to be selective about which parts of the VCF file get parsed.
 
 Features:
