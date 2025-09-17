@@ -479,7 +479,7 @@ getRangesForJobs(const std::string& vcfFilename, size_t numJobs, picovcf::RangeP
     std::vector<picovcf::RangePair> result;
     size_t start = useRange.first;
     while (start <= useRange.second) {
-        result.emplace_back(start, std::min(useRange.second, start + perPart - 1));
+        result.emplace_back(start, std::min<picovcf::VariantT>(useRange.second, start + perPart - 1));
         start += perPart;
     }
     return std::move(result);
