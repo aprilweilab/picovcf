@@ -86,5 +86,5 @@ endif()
 
 if(${BUILD_IGDTOOLS})
   add_executable(igdtools igdtools/igdtools.cpp)
-  target_link_libraries(igdtools ${LIBRARIES_TO_LINK})
+  target_link_libraries(igdtools ${LIBRARIES_TO_LINK} pthread)
 endif()

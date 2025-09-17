@@ -31,4 +31,4 @@ endif()
 include_directories(${CMAKE_CURRENT_LIST_DIR})
 
 add_executable(igdtools igdtools.cpp)
-target_link_libraries(igdtools ${LIBRARIES_TO_LINK})
+target_link_libraries(igdtools ${LIBRARIES_TO_LINK} pthread)
