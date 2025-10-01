@@ -2251,6 +2251,27 @@ public:
         return static_cast<size_t>(low);
     }
 
+    /**
+     * Given a variant index to start at, iterate all consecutive variants that have the same position
+     * and return the variant indices for that position. The returned indices are in ascending order.
+     * @param[in] variantIndex The variant index to start scanning from.
+     * @return The list of subsequent variant indexes that all share the same position.
+     */
+    std::vector<size_t> collectNextSite(size_t variantIndex) {
+        std::vector<size_t> results;
+        uint64_t sitePosition = INVALID_POSITION;
+        while (variantIndex < numVariants()) {
+            uint64_t position = getPosition(variantIndex);
+            if (sitePosition != INVALID_POSITION && position != sitePosition) {
+                break;
+            }
+            sitePosition = position;
+            results.push_back(variantIndex);
+            variantIndex++;
+        }
+        return std::move(results);
+    }
+
 private:
     size_t getVariantIndexOffset(VariantT variantIndex) {
         return m_header.filePosIndex + (variantIndex * sizeof(IndexEntry));

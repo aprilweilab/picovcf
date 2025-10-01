@@ -82,6 +82,9 @@ if(${BUILD_EXAMPLES})
   # igd_with_meta example
   add_executable(igd_with_meta examples/igd_with_meta.cpp)
   target_link_libraries(igd_with_meta ${LIBRARIES_TO_LINK})
+  # igd_flip example
+  add_executable(igd_flip examples/igd_flip.cpp)
+  target_link_libraries(igd_flip ${LIBRARIES_TO_LINK})
 endif()
 
 if(${BUILD_IGDTOOLS})
