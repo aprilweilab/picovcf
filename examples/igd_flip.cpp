@@ -116,11 +116,12 @@ int main(int argc, char* argv[]) {
         // Catch up to our current position if needed.
         while (flipIdx < flipIgd.numVariants() && (flipPos = flipIgd.getPosition(flipIdx, flipMissing)) < position) {
             PICOVCF_RELEASE_ASSERT(!flipMissing);
+            std::cout << "Skipping flip idx " << flipIdx << "\n";
             flipIdx++;
         }
 
         std::vector<SampleData> flipData =
-            (flipPos == position) ? collectSiteByAlleles(flipIgd, flipIdx) : std::vector<SampleData>();
+            (flipIdx < flipIgd.numVariants() && flipPos == position) ? collectSiteByAlleles(flipIgd, flipIdx) : std::vector<SampleData>();
         for (auto& sampleData : data) {
             // Handle any missing data first.
             if (!sampleData.missing.empty()) {
