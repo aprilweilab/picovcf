@@ -37,21 +37,24 @@ TEST(IGD, UnphasedData) {
 
     IGDData igdFile(igdFileName);
 
-    ASSERT_EQ(igdFile.numVariants(), 7);
+    // 7 + the 3 missingness variants
+    ASSERT_EQ(igdFile.numVariants(), 10);
     size_t totalOnes = 0;
     size_t totalTwos = 0;
+    size_t totalMiss = 0;
     for (size_t i = 0; i < igdFile.numVariants(); i++) {
         bool isMissing = false;
         uint8_t numCopies = 0;
         igdFile.getPosition(i, isMissing, numCopies);
-        ASSERT_GT(numCopies, 0);
+        ASSERT_TRUE(isMissing || numCopies > 0);
         ASSERT_LE(numCopies, 2);
-        ASSERT_FALSE(isMissing);
         auto sampleList = igdFile.getSamplesWithAlt(i);
         for (const auto index : sampleList) {
             ASSERT_LT(index, igdFile.numIndividuals());
         }
-        if (numCopies == 1) {
+        if (isMissing) {
+            totalMiss += sampleList.size();
+        } else if (numCopies == 1) {
             totalOnes += sampleList.size();
         } else if (numCopies == 2) {
             totalTwos += sampleList.size();
@@ -59,6 +62,7 @@ TEST(IGD, UnphasedData) {
     }
     ASSERT_EQ(totalOnes, 90+325+146+129);
     ASSERT_EQ(totalTwos, 2+2+1);
+    ASSERT_EQ(totalMiss, 4);
 }
 
 TEST(IGD, MixedPloidyData) {
