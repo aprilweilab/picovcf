@@ -100,16 +100,16 @@ TEST(IGD, LowerBound) {
 
     IGDData igdFile(igdFileName);
 
-    ASSERT_EQ(igdFile.numVariants(), 4);
+    ASSERT_EQ(igdFile.numVariants(), 7);
     size_t variantIndex = igdFile.lowerBoundPosition(0);
     ASSERT_EQ(variantIndex, 0);
     variantIndex = igdFile.lowerBoundPosition(56554);
-    ASSERT_EQ(variantIndex, 2);
+    ASSERT_EQ(variantIndex, 3);
     ASSERT_EQ(igdFile.getPosition(variantIndex), 56554);
     variantIndex = igdFile.lowerBoundPosition(56553);
-    ASSERT_EQ(variantIndex, 2);
-    variantIndex = igdFile.lowerBoundPosition(56812);
     ASSERT_EQ(variantIndex, 3);
+    variantIndex = igdFile.lowerBoundPosition(56812);
+    ASSERT_EQ(variantIndex, 5);
     variantIndex = igdFile.lowerBoundPosition(100000000);
     ASSERT_EQ(variantIndex, igdFile.numVariants());
 }

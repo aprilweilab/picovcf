@@ -88,6 +88,7 @@ static bool hasSample(const IGDSampleList& samples, SampleT id) {
 // Equality between VCF and IGD on the same data.
 TEST(ValidVCF, Indexable) {
     constexpr size_t EXPECT_VARIANTS = 4;
+    constexpr size_t EXPECT_MISS = 3;
     constexpr size_t EXPECT_INDIVIDUALS = 10000;
 
     // Verify the VCF file first.
@@ -99,7 +100,7 @@ TEST(ValidVCF, Indexable) {
     std::string testFilename = "tmp.indexable.igd";
     vcfToIGD(getMSPRIME_EXAMPLE_FILE(), testFilename);
     IGDData indexableData(testFilename);
-    ASSERT_EQ(indexableData.numVariants(), EXPECT_VARIANTS);
+    ASSERT_EQ(indexableData.numVariants(), EXPECT_VARIANTS+EXPECT_MISS);
     ASSERT_EQ(indexableData.numIndividuals(), EXPECT_INDIVIDUALS);
     ASSERT_EQ(indexableData.numSamples(), 2*EXPECT_INDIVIDUALS);
     bool _ignore = false;
@@ -111,7 +112,11 @@ TEST(ValidVCF, Indexable) {
         VCFVariantView& variant = vcf.currentVariant();
         ASSERT_FALSE(variant.getAltAlleles().size() > 1);
         bool isMissing = false;
-        ASSERT_EQ(variant.getPosition(), indexableData.getPosition(index, isMissing));
+        const auto position = indexableData.getPosition(index, isMissing);
+        if (isMissing) {
+            continue;
+        }
+        ASSERT_EQ(variant.getPosition(), position);
         auto sampleSet = indexableData.getSamplesWithAlt(index);
         const auto& gtArray = variant.getGenotypeArray();
         const size_t ploidy = variant.getMaxPloidy();

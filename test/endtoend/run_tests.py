@@ -76,8 +76,11 @@ class TestIgdTools(unittest.TestCase):
                 "POSITION\tREF\tALT\tALT COUNT\tTOTAL",
                 "55829\tA\tG\t90\t20000",
                 "56531\tA\tG\t329\t20000",
+                "56531\tA\t.\t2\t20000",
                 "56554\tA\tT\t150\t20000",
+                "56554\tA\t.\t2\t20000",
                 "56812\tG\tT\t131\t20000",
+                "56812\tG\t.\t4\t20000",
                 "",
             ],
         )
@@ -108,8 +111,11 @@ class TestIgdTools(unittest.TestCase):
                 "POSITION\tREF\tALT\tALT COUNT\tTOTAL",
                 "55829\tA\tG\t0\t8",
                 "56531\tA\tG\t1\t8",
+                "56531\tA\t.\t0\t8",
                 "56554\tA\tT\t1\t8",
+                "56554\tA\t.\t0\t8",
                 "56812\tG\tT\t0\t8",
+                "56812\tG\t.\t0\t8",
                 "",
             ],
         )
@@ -145,7 +151,7 @@ class TestIgdTools(unittest.TestCase):
         line_count = len(
             list(filter(lambda x: len(x.strip()) > 0, unphased_result.split("\n")))
         )
-        self.assertEqual(line_count, 8)
+        self.assertEqual(line_count, 11)
 
         if CLEANUP:
             quiet_del("unphased.example.igd")
@@ -187,7 +193,7 @@ class TestIgdTools(unittest.TestCase):
         line_count = len(
             list(filter(lambda x: len(x.strip()) > 0, unphased_result.split("\n")))
         )
-        self.assertEqual(line_count, 8)
+        self.assertEqual(line_count, 11)
 
         if CLEANUP:
             quiet_del("unphased2.example.igd")

@@ -1063,7 +1063,7 @@ int main(int argc, char* argv[]) {
                                 const auto& copySampleList = samplesByCopies[nc - 1];
                                 if (!copySampleList.empty()) {
                                     writer->writeVariantSamples(
-                                        *igdOutfile, pos, ref, alt, copySampleList, isMissing, nc);
+                                        *igdOutfile, pos, ref, alt, copySampleList, isMissing, isMissing ? 0 : nc);
                                     if (!vids.empty() && !noVariantIds) {
                                         newVariantIds.emplace_back(vids.at(i));
                                     }
