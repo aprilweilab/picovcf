@@ -510,6 +510,7 @@ int main(int argc, char* argv[]) {
                      "samples, sites, and variants.",
                      {'s', "stats"});
     args::Flag alleles(parser, "alleles", "Emit allele frequencies.", {'a', "alleles"});
+    args::Flag showLists(parser, "lists", "Emit sample lists.", {"lists"});
     args::Flag noVariantIds(
         parser, "noVariantIds", "Do not emit IDs for variants in the resulting IGD file.", {"no-var-ids"});
     args::ValueFlag<size_t> trimSamples(parser, "trimSamples", "Trim samples to this many individuals.", {"trim"});
@@ -558,6 +559,10 @@ int main(int argc, char* argv[]) {
                                  "jobs",
                                  "How many jobs (threads) to use. Only VCF->IGD conversion supports this currently",
                                  {'j', "jobs"});
+    args::Flag checkCanonical(parser,
+                              "check-canonical",
+                              "Check if the input IGD meets the requirements of a canonical IGD.",
+                              {'c', "check-canonical"});
     try {
         parser.ParseCLI(argc, argv);
     } catch (args::Help&) {
@@ -691,6 +696,7 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_VCF(dropNonSNVSites, "--drop-non-snv-sites");
             UNSUPPORTED_FOR_VCF(keepSamples, "--samples");
             UNSUPPORTED_FOR_VCF(mergeWith, "--merge");
+            UNSUPPORTED_FOR_VCF(checkCanonical, "--check-canonical");
 
             const bool emitVariantIds = !noVariantIds;
 
@@ -751,6 +757,7 @@ int main(int argc, char* argv[]) {
             UNSUPPORTED_FOR_MERGE(dropNonSNVSites, "--drop-non-snv-sites");
             UNSUPPORTED_FOR_MERGE(updateIndividualIds, "--update-individuals");
             UNSUPPORTED_FOR_MERGE(noVariantIds, "--no-var-ids");
+            UNSUPPORTED_FOR_MERGE(showLists, "--lists");
 
             std::vector<std::string> inputFilenames = {*infile};
             for (const auto& fn : *mergeWith) {
@@ -898,7 +905,11 @@ int main(int argc, char* argv[]) {
             writer->writeHeader(*igdOutfile, *infile, igd.getDescription());
         }
 
-        const bool iterateSamples = (bool)stats || (bool)alleles || (bool)outfile;
+        if (alleles && showLists) {
+            throw ApiMisuse("--alleles and --lists should not be used together.");
+        }
+        const bool iterateSamples =
+            (bool)stats || (bool)alleles || (bool)outfile || (bool)checkCanonical || (bool)showLists;
         if (iterateSamples) {
             static constexpr char SEP = '\t';
             std::stringstream copySS;
@@ -908,6 +919,8 @@ int main(int argc, char* argv[]) {
             CONDITION_PRINT(alleles,
                             "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "ALT COUNT" << SEP
                                        << "TOTAL" << std::endl);
+            CONDITION_PRINT(
+                showLists, "POSITION" << SEP << copySS.str() << "REF" << SEP << "ALT" << SEP << "SAMPLES" << std::endl);
 
             size_t sites = 0;
             bool _ignore = false;
@@ -1012,13 +1025,21 @@ int main(int argc, char* argv[]) {
                     }
                     const auto& ref = igd.getRefAllele(i);
                     const auto& alt = igd.getAltAllele(i);
-                    if (alleles) {
+                    if (alleles || showLists) {
                         std::cout << pos << SEP;
                         if (!igd.isPhased()) {
                             std::cout << (uint64_t)numCopies << SEP;
                         }
                         const std::string altOut = isMissing ? "." : alt;
-                        std::cout << ref << SEP << altOut << SEP << sampleCt << SEP << effectiveSampleCt << std::endl;
+                        std::cout << ref << SEP << altOut << SEP;
+                        if (alleles) {
+                            std::cout << sampleCt << SEP << effectiveSampleCt << std::endl;
+                        } else {
+                            for (const auto& s : sampleList) {
+                                std::cout << s << ", ";
+                            }
+                            std::cout << std::endl;
+                        }
                     }
                     if (outfile) {
                         if (!forcingUnphased) {

@@ -74,13 +74,13 @@ std::vector<SampleData> collectSiteByAlleles(IGDData& igd, size_t& variantIndex)
             result.push_back({{}, {}, {}, ref, alt, pos});
         }
         if (numCopies == 2) {
-            setOrAppendSamples(result[resultIdx].homSamples, std::move(igd.getSamplesWithAlt(s)));
+            setOrAppendSamples(result.at(resultIdx).homSamples, std::move(igd.getSamplesWithAlt(s)));
         } else {
             PICOVCF_RELEASE_ASSERT(numCopies < 2);
             if (isMissing) {
-                setOrAppendSamples(result[resultIdx].missing, std::move(igd.getSamplesWithAlt(s)));
+                setOrAppendSamples(result.at(resultIdx).missing, std::move(igd.getSamplesWithAlt(s)));
             } else {
-                setOrAppendSamples(result[resultIdx].hetSamples, std::move(igd.getSamplesWithAlt(s)));
+                setOrAppendSamples(result.at(resultIdx).hetSamples, std::move(igd.getSamplesWithAlt(s)));
             }
         }
     }
@@ -120,13 +120,20 @@ int main(int argc, char* argv[]) {
             flipIdx++;
         }
 
-        std::vector<SampleData> flipData =
-            (flipIdx < flipIgd.numVariants() && flipPos == position) ? collectSiteByAlleles(flipIgd, flipIdx) : std::vector<SampleData>();
+        std::vector<SampleData> flipData = (flipIdx < flipIgd.numVariants() && flipPos == position)
+                                               ? collectSiteByAlleles(flipIgd, flipIdx)
+                                               : std::vector<SampleData>();
         for (auto& sampleData : data) {
-            // Handle any missing data first.
+            // Handle any missing data first. Just convert the individual indices to haplotype indices, and make all
+            // missingness homozygous.
             if (!sampleData.missing.empty()) {
+                IGDSampleList missAsHaps;
+                for (const auto& indivIdx : sampleData.missing) {
+                    missAsHaps.emplace_back(2 * indivIdx);
+                    missAsHaps.emplace_back((2 * indivIdx) + 1);
+                }
                 writer.writeVariantSamples(
-                    outStream, sampleData.position, sampleData.ref, sampleData.alt, sampleData.missing, true);
+                    outStream, sampleData.position, sampleData.ref, sampleData.alt, missAsHaps, true);
             }
 
             // Convert the homozygotes into haplotypes.
