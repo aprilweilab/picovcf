@@ -32,6 +32,11 @@ cp ./dist/*.tar.gz ./dist/wheelhouse/
 
 ```
 
+Test the source distribution:
+```
+pip install --force-reinstall ./dist/wheelhouse/igdtools-*.tar.gz
+```
+
 To upload to PyPi:
 ```
 python3 -m twine upload dist/wheelhouse/*
