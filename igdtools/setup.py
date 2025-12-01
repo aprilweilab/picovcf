@@ -73,7 +73,7 @@ class CMakeBuild(build_ext):
 
 PACKAGE_NAME = "igdtools"
 BINARY_NAME = "igdtools"
-version = "2.5"
+version = "2.6"
 with open(os.path.join(THIS_DIR, "README.md")) as f:
     long_description = f.read()
 setup(
@@ -97,4 +97,13 @@ setup(
     },
     long_description=long_description,
     long_description_content_type="text/markdown",
+    license="MIT",
+    keywords=[
+        "population genetics",
+        "popgen",
+        "statistical genetics",
+        "statgen",
+        "computational biology",
+        "compbio",
+    ],
 )
