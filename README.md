@@ -1,6 +1,8 @@
 ![](https://github.com/aprilweilab/picovcf/actions/workflows/cmake-multi-platform.yml/badge.svg)
 ![](https://readthedocs.org/projects/picovcf/badge/?version=latest)
 
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/igdtools/README.html)
+
 # picovcf
 
 Single-header C++ library for fast/low-memory VCF (Variant Call Format) parsing. Gzipped VCF (.vcf.gz) is optionally supported.
@@ -83,6 +85,12 @@ For example, the following are from chromosome 22 of a real dataset:
 * `.igd`: 183MB
 
 Converting the `.vcf.gz` to `.bgen` (via qctool) took 23 minutes, but converting to `.igd` only took 3 minutes. Furthermore, iteratively accessing all the variants (and genotype data) in the `.igd` file was approximately `15x` faster than accessing the same data in the `.vcf.gz` file (using `picovcf`). On Biobank-scale real datasets, IGD is on average 3.5x smaller than `.vcf.gz`.
+
+### Installing just `igdtools`
+
+You can install `igdtools` via PyPi: `pip install igdtools`
+
+Or via [the conda package](https://bioconda.github.io/recipes/igdtools/README.html), after adding the [bioconda](https://bioconda.github.io/) channel: `conda install igdtools`
 
 ### How do I use IGD in my project?
 
