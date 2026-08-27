@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "picovcf.hpp"
+#include "testing_utilities.h"
 
 #include <string>
 
@@ -252,5 +253,57 @@ TEST(ValidVCF, Contigs) {
         const auto positions = getAllPositions(vcf);
         const std::vector<size_t> expected = {14000, 14500, 17777};
         ASSERT_EQ(positions, expected);
+    }
+}
+
+TEST(ValidVCF, ContigLength) {
+    // Create a VCF with a bogus contig header (seen in SGDP, converted from the BCF)
+    {
+        std::string vcfFilename = writeTempFile(
+            "##fileformat=VCFv4.2\n"
+            "##FILTER=<ID=PASS,Description=\"All filters passed\">\n"
+            "##fileDate=15/07/2020 - 23:22:36\n"
+            "##source=GLIMPSE_phase v1.0.0\n"
+            "##contig=<ID=22>\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMP1\tSAMP2\n"
+            "22\t1\tV1\tA\tT\t.\tPASS\t.\tGT\t0|1\t0|0\n"
+            "22\t100\tV1\tA\tT\t.\tPASS\t.\tGT\t1|1\t1|1\n",
+            /*ext=*/".vcf");
+        const size_t EXPECT_VARIANTS = 2;
+        VCFFile vcf(vcfFilename, PVCF_VCFFILE_CONTIG_REQUIRE_ONE);
+        RangePair range = vcf.getGenomeRange();
+        RangePair expect = {1, 100};
+        ASSERT_EQ(range, expect);
+        ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcf.numIndividuals(), 2);
+        const auto positions = getAllPositions(vcf);
+        const std::vector<size_t> expected = {1, 100};
+        ASSERT_EQ(positions, expected);
+        remove_file(vcfFilename);
+    }
+
+    // Create a VCF with a good contig header
+    {
+        std::string vcfFilename = writeTempFile(
+            "##fileformat=VCFv4.2\n"
+            "##FILTER=<ID=PASS,Description=\"All filters passed\">\n"
+            "##fileDate=15/07/2020 - 23:22:36\n"
+            "##source=GLIMPSE_phase v1.0.0\n"
+            "##contig=<ID=22,length=999>\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMP1\tSAMP2\n"
+            "22\t1\tV1\tA\tT\t.\tPASS\t.\tGT\t0|1\t0|0\n"
+            "22\t100\tV1\tA\tT\t.\tPASS\t.\tGT\t1|1\t1|1\n",
+            /*ext=*/".vcf");
+        const size_t EXPECT_VARIANTS = 2;
+        VCFFile vcf(vcfFilename, PVCF_VCFFILE_CONTIG_REQUIRE_ONE);
+        RangePair range = vcf.getGenomeRange();
+        RangePair expect = {0, 999};
+        ASSERT_EQ(range, expect);
+        ASSERT_EQ(vcf.numVariants(), EXPECT_VARIANTS);
+        ASSERT_EQ(vcf.numIndividuals(), 2);
+        const auto positions = getAllPositions(vcf);
+        const std::vector<size_t> expected = {1, 100};
+        ASSERT_EQ(positions, expected);
+        remove_file(vcfFilename);
     }
 }
