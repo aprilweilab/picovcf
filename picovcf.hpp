@@ -1397,7 +1397,7 @@ public:
             m_contigHandling = PVCH_SPECIFIC;
             m_contig = contig;
         }
-        if (!m_contig.empty() && getContig(m_contig, length, ignore)) {
+        if (!m_contig.empty() && getContig(m_contig, length, ignore) && length != INTERNAL_VALUE_NOT_SET) {
             m_genomeRange.first = 0;
             m_genomeRange.second = length;
         }
@@ -1480,7 +1480,7 @@ public:
                         PICOVCF_THROW_ERROR(MalformedFile, "Invalid contig length: " << lenStr);
                     }
                 } else {
-                    length = 0;
+                    length = INTERNAL_VALUE_NOT_SET;
                 }
                 found = true;
                 break;
